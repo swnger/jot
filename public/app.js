@@ -60,34 +60,27 @@
           </div>
           <div class="topbar-right">
             <button type="button" class="icon-button" id="newNoteButton" aria-label="New note">+</button>
-            <button type="button" class="text-button topbar-desktop" id="logoutButton">logout</button>
+            <button type="button" class="icon-button ghost" id="settingsButton" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+            <button type="button" class="icon-button ghost" id="logoutButton" aria-label="Logout" title="Logout"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M6 2H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M10.5 11.5L14 8l-3.5-3.5M6 8h8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
             <button type="button" class="text-button theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
           </div>
         </header>
         <main class="list-page">
           <div class="list-search-wrap">
             <input class="list-search" id="searchInput" type="text" placeholder="Search notes" autocomplete="off" />
-            <div class="search-hint" id="searchHint"></div>
           </div>
           <div class="note-list" id="noteList"></div>
-          <section class="api-keys-section">
-            <div class="api-keys-header">
-              <h2 class="api-keys-title">API Keys</h2>
-              <button type="button" class="text-button" id="createKeyButton">+ new key</button>
-            </div>
-            <div id="apiKeysList"></div>
-          </section>
         </main>
+        <div class="modal-backdrop hidden" id="listModalBackdrop"></div>
       </div>
     `;
 
     const searchInput = document.getElementById("searchInput");
     const noteList = document.getElementById("noteList");
-    const searchHint = document.getElementById("searchHint");
     const newNoteButton = document.getElementById("newNoteButton");
+    const settingsButton = document.getElementById("settingsButton");
     const logoutButton = document.getElementById("logoutButton");
-    const createKeyButton = document.getElementById("createKeyButton");
-    const apiKeysList = document.getElementById("apiKeysList");
+    const listModalBackdrop = document.getElementById("listModalBackdrop");
 
     newNoteButton.addEventListener("click", async () => {
       const payload = await api("/api/notes", { method: "POST" });
@@ -95,6 +88,7 @@
     });
 
     logoutButton.addEventListener("click", logoutOwner);
+    settingsButton.addEventListener("click", () => openSettingsModal());
 
     searchInput.addEventListener("input", () => {
       clearTimeout(state.searchTimer);
@@ -118,70 +112,90 @@
       window.location.href = `/notes/${row.dataset.noteId}`;
     });
 
-    createKeyButton.addEventListener("click", async () => {
-      const label = prompt("Label for this API key:");
-      if (!label) {
-        return;
-      }
-      const result = await api("/api/keys", { method: "POST", body: { label } });
-      await loadApiKeys();
-      showNewKey(result.id, result.key);
-    });
-
-    apiKeysList.addEventListener("click", async (event) => {
-      const copyBtn = event.target.closest("[data-copy-key]");
-      if (copyBtn) {
-        try {
-          await navigator.clipboard.writeText(copyBtn.dataset.copyKey);
-          copyBtn.classList.add("copy-success");
-          setTimeout(() => copyBtn.classList.remove("copy-success"), 1200);
-        } catch {}
-        return;
-      }
-      const deleteBtn = event.target.closest("[data-delete-key]");
-      if (!deleteBtn) {
-        return;
-      }
-      const keyId = deleteBtn.dataset.deleteKey;
-      if (!confirm("Delete this API key?")) {
-        return;
-      }
-      await api(`/api/keys/${keyId}`, { method: "DELETE" });
-      loadApiKeys();
-    });
-
     loadNotes("");
-    loadApiKeys();
 
-    async function loadApiKeys() {
-      const response = await api("/api/keys");
-      apiKeysList.innerHTML = response.keys.length
-        ? response.keys.map((key) => `
-            <div class="api-key-row" data-key-id="${escapeHtml(key.id)}">
-              <div class="api-key-info">
-                <span class="api-key-label">${escapeHtml(key.label)}</span>
-                <span class="api-key-meta">${escapeHtml(formatDate(key.createdAt))}</span>
-              </div>
-              <button type="button" class="icon-action danger" data-delete-key="${escapeHtml(key.id)}" aria-label="Delete key" title="Delete key"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M6.2 4.5V3.4c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="m5 6.2.5 6.1c0 .4.4.7.8.7h3.4c.4 0 .8-.3.8-.7l.5-6.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    function openSettingsModal() {
+      listModalBackdrop.classList.remove("hidden");
+      listModalBackdrop.innerHTML = `
+        <div class="modal settings-modal" role="dialog" aria-modal="true">
+          <div class="settings-header">
+            <h2 class="settings-title">Settings</h2>
+            <button type="button" class="icon-button ghost" id="settingsClose" aria-label="Close">&times;</button>
+          </div>
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <h3 class="settings-section-title">API Keys</h3>
+              <button type="button" class="text-button" id="createKeyButton">+ new key</button>
             </div>
-          `).join("")
-        : '<div class="api-keys-empty">No API keys. Create one for CLI access.</div>';
-    }
+            <div id="apiKeysList"></div>
+          </div>
+        </div>
+      `;
 
-    function showNewKey(keyId, key) {
-      const row = apiKeysList.querySelector(`[data-key-id="${keyId}"]`);
-      if (!row) {
-        return;
+      const apiKeysList = document.getElementById("apiKeysList");
+      const createKeyButton = document.getElementById("createKeyButton");
+
+      function closeSettings() {
+        listModalBackdrop.classList.add("hidden");
+        listModalBackdrop.innerHTML = "";
       }
-      const existing = row.querySelector(".api-key-secret");
-      if (existing) {
-        existing.remove();
+
+      document.getElementById("settingsClose").addEventListener("click", closeSettings);
+      listModalBackdrop.addEventListener("click", (e) => { if (e.target === listModalBackdrop) closeSettings(); });
+
+      createKeyButton.addEventListener("click", async () => {
+        const label = prompt("Label for this API key:");
+        if (!label) return;
+        const result = await api("/api/keys", { method: "POST", body: { label } });
+        await renderKeys();
+        showNewKey(result.id, result.key);
+      });
+
+      apiKeysList.addEventListener("click", async (event) => {
+        const copyBtn = event.target.closest("[data-copy-key]");
+        if (copyBtn) {
+          try {
+            await navigator.clipboard.writeText(copyBtn.dataset.copyKey);
+            copyBtn.classList.add("copy-success");
+            setTimeout(() => copyBtn.classList.remove("copy-success"), 1200);
+          } catch {}
+          return;
+        }
+        const deleteBtn = event.target.closest("[data-delete-key]");
+        if (!deleteBtn) return;
+        if (!confirm("Delete this API key?")) return;
+        await api(`/api/keys/${deleteBtn.dataset.deleteKey}`, { method: "DELETE" });
+        renderKeys();
+      });
+
+      async function renderKeys() {
+        const response = await api("/api/keys");
+        apiKeysList.innerHTML = response.keys.length
+          ? response.keys.map((key) => `
+              <div class="api-key-row" data-key-id="${escapeHtml(key.id)}">
+                <div class="api-key-info">
+                  <span class="api-key-label">${escapeHtml(key.label)}</span>
+                  <span class="api-key-meta">${escapeHtml(formatDate(key.createdAt))}</span>
+                </div>
+                <button type="button" class="icon-action danger" data-delete-key="${escapeHtml(key.id)}" aria-label="Delete key" title="Delete key"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M6.2 4.5V3.4c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="m5 6.2.5 6.1c0 .4.4.7.8.7h3.4c.4 0 .8-.3.8-.7l.5-6.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+              </div>
+            `).join("")
+          : '<div class="api-keys-empty">No API keys yet.</div>';
       }
-      const secret = document.createElement("div");
-      secret.className = "api-key-secret";
-      secret.innerHTML = `<code>${escapeHtml(key)}</code><button type="button" class="icon-action" data-copy-key="${escapeHtml(key)}" aria-label="Copy key" title="Copy key"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="7" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 5.5V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v6.5a1 1 0 0 0 1 1h1.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></button>`;
-      const deleteBtn = row.querySelector(".icon-action[data-delete-key]");
-      row.insertBefore(secret, deleteBtn);
+
+      function showNewKey(keyId, key) {
+        const row = apiKeysList.querySelector(`[data-key-id="${keyId}"]`);
+        if (!row) return;
+        const existing = row.querySelector(".api-key-secret");
+        if (existing) existing.remove();
+        const secret = document.createElement("div");
+        secret.className = "api-key-secret";
+        secret.innerHTML = `<code>${escapeHtml(key)}</code><button type="button" class="icon-action" data-copy-key="${escapeHtml(key)}" aria-label="Copy key" title="Copy key"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="7" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 5.5V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v6.5a1 1 0 0 0 1 1h1.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></button>`;
+        const deleteBtn = row.querySelector(".icon-action[data-delete-key]");
+        row.insertBefore(secret, deleteBtn);
+      }
+
+      renderKeys();
     }
 
     async function loadNotes(query) {
@@ -190,7 +204,6 @@
       const hasQuery = query.trim().length > 0;
 
       document.querySelector(".list-search-wrap").style.display = (hasNotes || hasQuery) ? "" : "none";
-      searchHint.textContent = hasNotes ? `${response.notes.length} note${response.notes.length === 1 ? "" : "s"}` : "";
 
       if (!hasNotes && !hasQuery) {
         noteList.innerHTML = `<div class="empty-state-create"><p class="empty-state-text">No notes yet.</p><button type="button" class="empty-state-button" id="emptyCreateBtn">Create note</button></div>`;
@@ -206,14 +219,12 @@
             .map(
               (note) => `
                 <div class="note-row" data-note-id="${escapeHtml(note.id)}">
-                  <div>
+                  <div class="note-row-content">
                     <div class="note-row-title">${escapeHtml(note.title || "untitled")}</div>
                     <div class="note-row-snippet">${escapeHtml(note.snippet || "Empty note")}</div>
-                  </div>
-                  <div class="note-row-right">
                     <div class="note-row-meta">${escapeHtml(formatDate(note.updatedAt))}</div>
-                    <button type="button" class="icon-action danger note-delete-btn" data-note-id="${escapeHtml(note.id)}" aria-label="Delete note" title="Delete note"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M6.2 4.5V3.4c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="m5 6.2.5 6.1c0 .4.4.7.8.7h3.4c.4 0 .8-.3.8-.7l.5-6.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
                   </div>
+                  <button type="button" class="icon-action danger note-delete-btn" data-note-id="${escapeHtml(note.id)}" aria-label="Delete note" title="Delete note"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M6.2 4.5V3.4c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="m5 6.2.5 6.1c0 .4.4.7.8.7h3.4c.4 0 .8-.3.8-.7l.5-6.1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
                 </div>
               `,
             )
@@ -348,6 +359,9 @@
             setSaveStatus(refs, connected ? "" : "Disconnected");
             const banner = document.getElementById("disconnectedBanner");
             if (banner) banner.classList.toggle("hidden", connected);
+          },
+          onThreadsUpdated: () => {
+            reloadThreads(isPublic);
           },
         });
       });
@@ -545,6 +559,10 @@
         ws.onmessage = (event) => {
           let msg;
           try { msg = JSON.parse(event.data); } catch { return; }
+          if (msg.type === "threads-updated") {
+            reloadThreads(publicMode);
+            return;
+          }
           if (msg.type !== "updated") {
             return;
           }
@@ -612,14 +630,20 @@
     }
 
     async function reloadThreads(publicMode) {
-      const endpoint = publicMode ? `/api/share/${state.note.shareId}` : `/api/notes/${state.note.id}`;
-      const payload = await api(endpoint);
-      state.viewer = payload.viewer;
-      state.threads = payload.threads;
-      if (refs.commenterLabel) {
-        refs.commenterLabel.textContent = payload.viewer.commenterName ? payload.viewer.commenterName : "anonymous";
+      if (!state.note) return;
+      try {
+        const endpoint = publicMode ? `/api/share/${state.note.shareId}` : `/api/notes/${state.note.id}`;
+        const payload = await api(endpoint);
+        state.viewer = payload.viewer;
+        state.threads = payload.threads;
+        if (refs.commenterLabel) {
+          refs.commenterLabel.textContent = payload.viewer.commenterName ? payload.viewer.commenterName : "anonymous";
+        }
+        syncThreadLayout(refs);
+        refreshOpenThreadDialog(refs, publicMode);
+      } catch (e) {
+        console.error("Failed to reload threads:", e);
       }
-      syncThreadLayout(refs);
     }
 
     function applyNotePayload(payload, refsArg, publicMode) {
@@ -676,9 +700,9 @@
             <span class="status-text" id="saveStatus"></span>
           </div>
           <div class="topbar-right">
-            <button type="button" class="text-button" id="previewFab">preview</button>
+            <button type="button" class="icon-button ghost" id="previewFab" aria-label="Preview" title="Preview"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></button>
             <div class="share-popover-wrap" id="sharePopoverWrap">
-              <button type="button" class="text-button" id="shareButton">share</button>
+              <button type="button" class="icon-button ghost" id="shareButton" aria-label="Share" title="Share"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="12" cy="4" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="12" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.8 7.1l4.4-2.2M5.8 8.9l4.4 2.2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></button>
               <div class="share-popover hidden" id="sharePopover"></div>
             </div>
             <button type="button" class="icon-button ghost" id="logoutButton" aria-label="Logout" title="Logout"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M6 2H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M10.5 11.5L14 8l-3.5-3.5M6 8h8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
@@ -763,7 +787,7 @@
             <span class="status-text" id="saveStatus"></span>
           </div>
           <div class="topbar-right">
-            <button type="button" class="text-button" id="previewFab">preview</button>
+            <button type="button" class="icon-button ghost" id="previewFab" aria-label="Preview" title="Preview"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></button>
             <button type="button" class="text-button theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
           </div>
         </header>
@@ -1375,6 +1399,19 @@
       refs.commenterLabel.textContent = payload.viewer.commenterName || "anonymous";
     }
     syncThreadLayout(refs);
+  }
+
+  function refreshOpenThreadDialog(refs, isPublic) {
+    if (!state.modalOpen || !state.activeThreadId) return;
+    const body = refs.modalBackdrop?.querySelector(".thread-modal-body");
+    if (!body) return;
+    const thread = state.threads.find((item) => item.id === state.activeThreadId);
+    if (!thread) {
+      closeModal(refs);
+      state.activeThreadId = null;
+      return;
+    }
+    body.innerHTML = renderThreadCard(thread);
   }
 
   function openThreadDialog(threadId, refs, isPublic) {

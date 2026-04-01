@@ -609,6 +609,7 @@ app.post("/api/share/:shareId/threads", (req, res) => {
   note.threads.push(thread);
   note.updatedAt = nowIso();
   persistNote(note);
+  broadcastThreadsUpdated(note);
   res.json({ ok: true, threads: serializeThreads(note, req) });
 });
 
@@ -654,6 +655,7 @@ app.post("/api/share/:shareId/threads/:threadId/replies", (req, res) => {
   thread.updatedAt = timestamp;
   note.updatedAt = timestamp;
   persistNote(note);
+  broadcastThreadsUpdated(note);
   res.json({ ok: true, threads: serializeThreads(note, req) });
 });
 
@@ -676,6 +678,7 @@ app.patch("/api/share/:shareId/threads/:threadId", (req, res) => {
   thread.updatedAt = nowIso();
   note.updatedAt = thread.updatedAt;
   persistNote(note);
+  broadcastThreadsUpdated(note);
   res.json({ ok: true, threads: serializeThreads(note, req) });
 });
 
@@ -697,6 +700,7 @@ app.delete("/api/share/:shareId/threads/:threadId", (req, res) => {
   note.threads = note.threads.filter((item) => item.id !== thread.id);
   note.updatedAt = nowIso();
   persistNote(note);
+  broadcastThreadsUpdated(note);
   res.json({ ok: true, threads: serializeThreads(note, req) });
 });
 
@@ -726,6 +730,7 @@ app.patch("/api/share/:shareId/messages/:messageId", (req, res) => {
   located.thread.updatedAt = located.message.updatedAt;
   note.updatedAt = located.message.updatedAt;
   persistNote(note);
+  broadcastThreadsUpdated(note);
   res.json({ ok: true, threads: serializeThreads(note, req) });
 });
 
@@ -753,6 +758,7 @@ app.delete("/api/share/:shareId/messages/:messageId", (req, res) => {
 
   note.updatedAt = nowIso();
   persistNote(note);
+  broadcastThreadsUpdated(note);
   res.json({ ok: true, threads: serializeThreads(note, req) });
 });
 
@@ -967,7 +973,7 @@ function handleEditorMessage(conn: ClientConn, data: string) {
   broadcastNoteUpdate(note);
 }
 
-type AnyServerMessage = (ServerHelloMessage & { clientId?: string }) | ServerMutationMessage | ServerPresenceMessage | ServerPresenceLeaveMessage | { type: "updated"; noteId: string; shareId: string; updatedAt: string };
+type AnyServerMessage = (ServerHelloMessage & { clientId?: string }) | ServerMutationMessage | ServerPresenceMessage | ServerPresenceLeaveMessage | { type: "updated"; noteId: string; shareId: string; updatedAt: string } | { type: "threads-updated"; noteId: string; shareId: string };
 
 function sendServerMessage(ws: WebSocket, message: AnyServerMessage) {
   if (ws.readyState === 1) {
@@ -1043,6 +1049,15 @@ function broadcastNoteUpdate(note: NoteRecord) {
   };
   for (const conn of clients) {
     if (conn.kind === "public-viewer" && conn.shareId === note.shareId) {
+      sendServerMessage(conn.ws, message);
+    }
+  }
+}
+
+function broadcastThreadsUpdated(note: NoteRecord) {
+  const message = { type: "threads-updated" as const, noteId: note.id, shareId: note.shareId };
+  for (const conn of clients) {
+    if (conn.noteId === note.id) {
       sendServerMessage(conn.ws, message);
     }
   }
