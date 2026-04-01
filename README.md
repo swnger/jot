@@ -27,8 +27,9 @@ Open `http://localhost:3210`. Set the owner password on first visit.
 
 ```bash
 npm run build
-node dist/server.js                  # default port 3210
-node dist/server.js --port=8080      # custom port
+node dist/server.js                          # port 3210, data in ./data
+node dist/server.js --port=8080              # custom port
+node dist/server.js --data=/var/lib/jot       # custom data directory
 ```
 
 ## Docker

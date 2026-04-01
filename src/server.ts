@@ -76,9 +76,13 @@ type ViewerInfo = {
   hasCommenterIdentity: boolean;
 };
 
-const portArg = process.argv.find((arg) => arg.startsWith("--port="));
-const port = Number(portArg ? portArg.split("=")[1] : process.env.PORT || 3210);
-const dataDir = process.env.DATA_DIR || path.join(process.cwd(), "data");
+function cliArg(name: string) {
+  const match = process.argv.find((arg) => arg.startsWith(`--${name}=`));
+  return match ? match.split("=").slice(1).join("=") : null;
+}
+
+const port = Number(cliArg("port") || process.env.PORT || 3210);
+const dataDir = cliArg("data") || process.env.DATA_DIR || path.join(process.cwd(), "data");
 const notesDir = path.join(dataDir, "notes");
 const authFilePath = path.join(dataDir, "auth.json");
 const publicDir = path.join(process.cwd(), "public");
@@ -510,7 +514,8 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 app.listen(port, () => {
-  console.log(`minimal-md-comments listening on http://localhost:${port}`);
+  console.log(`jot listening on http://localhost:${port}`);
+  console.log(`data: ${path.resolve(dataDir)}`);
 });
 
 function ensureDirectories() {
