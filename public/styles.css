@@ -315,6 +315,7 @@ input:focus, textarea:focus { border-color: var(--muted); }
 .markdown-body table { width: 100%; border-collapse: collapse; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 0.55rem 0.7rem; text-align: left; }
 .markdown-body a { color: var(--blue); }
+.markdown-body img { max-width: 100%; height: auto; }
 
 .hljs { color: var(--hljs-text); background: transparent; }
 .hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-name, .hljs-literal { color: var(--hljs-keyword); }
