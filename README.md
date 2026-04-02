@@ -109,7 +109,7 @@ All owner endpoints require `Authorization: Bearer <api-key>`.
 
 | Method | Endpoint                              | Description                         |
 | ------ | ------------------------------------- | ----------------------------------- |
-| GET    | `/api/notes?q=<query>`                 | List/search notes                   |
+| GET    | `/api/notes?q=<query>`                | List/search notes                   |
 | POST   | `/api/notes`                          | Create note                         |
 | GET    | `/api/notes/:id`                      | Read note                           |
 | PUT    | `/api/notes/:id`                      | Update title, markdown, shareAccess |

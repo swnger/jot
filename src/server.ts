@@ -1638,7 +1638,14 @@ const shareAccessLevels: Record<ShareAccess, number> = { none: 0, view: 1, comme
 
 function requireShareAccess(req: Request, res: Response, minAccess: ShareAccess): NoteRecord | null {
   const note = findNoteByShareId(String(req.params.shareId));
-  if (!note || shareAccessLevels[note.shareAccess] < shareAccessLevels[minAccess]) {
+  if (!note) {
+    res.status(404).json({ ok: false, error: "Shared note not found." });
+    return null;
+  }
+  if (isOwnerAuthenticated(req)) {
+    return note;
+  }
+  if (shareAccessLevels[note.shareAccess] < shareAccessLevels[minAccess]) {
     res.status(404).json({ ok: false, error: "Shared note not found." });
     return null;
   }
