@@ -28,6 +28,7 @@
           if (pre) { pre.textContent = pre.getAttribute("data-original-code") || ""; wrap.replaceWith(pre); }
           else { wrap.remove(); }
         });
+        if (window.__clearMermaidCache) window.__clearMermaidCache();
         if (window.__renderMermaid) window.__renderMermaid(container);
       }
     }

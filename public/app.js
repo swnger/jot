@@ -80,6 +80,7 @@
     mermaidCache = newCache;
   }
   window.__renderMermaid = renderMermaid;
+  window.__clearMermaidCache = () => { mermaidCache = []; };
 
   function setPreviewHtml(refs, html) {
     if (!refs.previewContent) return;
