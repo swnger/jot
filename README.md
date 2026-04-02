@@ -60,6 +60,7 @@ The instance owner creates API keys from the settings gear on the landing page. 
 ```bash
 npx @mariozechner/jot register myserver https://jot.example.com <api-key>
 npx @mariozechner/jot myserver list
+npx @mariozechner/jot myserver search "query"
 npx @mariozechner/jot myserver read <note-id>
 npx @mariozechner/jot myserver create "My note"
 npx @mariozechner/jot myserver edit <note-id> '[{"oldText":"foo","newText":"bar"}]'
