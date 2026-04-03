@@ -1,443 +1,177 @@
-# jot collaborative rewrite plan
-
-This file is for the next session. Read it first, then execute it. Do not keep patching the current collaborative editor. Replace it cleanly.
-
-## Immediate instruction to future self
-
-The current collab path is half-old, half-new, and broken. Stop trying to salvage it piecemeal.
-
-Immediately do a full semantic rewrite of collaborative editing based on the `articulated` semantic-rebasing demo architecture.
-
-No backward compatibility is required.
-
-It is acceptable to break old local test data and require fresh notes.
-
-Keep comments, auth, API keys, CLI, themes, mobile preview, and share flows working, but rebuild the document editing core from first principles.
-
-## Current repo
-
-Repo root:
-- `/Users/badlogic/workspaces/jot`
-
-Important current files in this repo:
-- `src/server.ts`
-- `src/collab.ts`
-- `public/app.js`
-- `public/collab-editor.js`
-- `public/styles.css`
-- `public/theme.js`
-- `public/login.js`
-- `cli/jot.mjs`
-- `README.md`
-- `Dockerfile`
-- `docker/docker-compose.base.yml`
-- `docker/docker-compose.prod.yml`
-- `docker/docker-compose.dev.yml`
-- `docker/control.sh`
+# Shared AI Layer Implementation Plan
 
-## External references to read fully before coding
-
-### 1. Matt Weidner article
-Read fully:
-- `https://mattweidner.com/2025/05/21/text-without-crdts.html`
-
-Core concepts to use:
-- stable character ids
-- semantic client mutations
-- server applies mutations literally
-- server reconciliation on clients
-- no CRDT ordering logic needed for centralized server
-
-### 2. articulated library docs
-Read:
-- `node_modules/articulated/README.md`
-- `node_modules/articulated/build/commonjs/index.d.ts`
-- `node_modules/articulated/build/commonjs/id_list.d.ts`
-- `node_modules/articulated/build/commonjs/element_id.d.ts`
-- `node_modules/articulated/build/commonjs/element_id_generator.d.ts`
-- `node_modules/articulated/build/commonjs/saved_id_list.d.ts`
-
-### 3. semantic-rebasing demo
-Local clone already exists at:
-- `/tmp/articulated-demos/semantic-rebasing`
-
-Read these files fully:
-- `/tmp/articulated-demos/semantic-rebasing/README.md`
-- `/tmp/articulated-demos/semantic-rebasing/src/common/tracked_id_list.ts`
-- `/tmp/articulated-demos/semantic-rebasing/src/common/client_mutations.ts`
-- `/tmp/articulated-demos/semantic-rebasing/src/common/client_messages.ts`
-- `/tmp/articulated-demos/semantic-rebasing/src/common/server_messages.ts`
-- `/tmp/articulated-demos/semantic-rebasing/src/site/web_socket_client.ts`
-- `/tmp/articulated-demos/semantic-rebasing/src/site/prosemirror_wrapper.ts`
-- `/tmp/articulated-demos/semantic-rebasing/src/server/rich_text_server.ts`
-- `/tmp/articulated-demos/semantic-rebasing/src/server/server.ts`
-
-Do not cargo-cult ProseMirror. We use a textarea. But copy the architecture exactly:
-- client sends mutations
-- server applies mutations
-- server broadcasts canonical updates
-- client maintains confirmed state + pending mutations
-- client restores selection by ids
-
-## What is currently broken
-
-Current state is not a real rewrite.
-
-Problems:
-- editor path mixes REST refresh logic and WebSocket op logic
-- generic `updated` broadcasts stomp local state
-- ack / pending mutation handling is incomplete
-- cursor and selection drift under normal typing speed
-- current `public/collab-editor.js` is experimental and should be discarded
-- some server routes still derive from markdown in ways that conflict with collab state ownership
-
-## Non-goals for the rewrite
-
-- no attempt to preserve old note metadata format exactly
-- no migration tooling beyond best-effort fresh conversion from existing `.md` files
-- no operation-level history slider in this rewrite
-- no remote cursors yet
-- no collaborative public edit mode yet
-
-Those can come after stable collaborative editing.
-
-## Goals for the rewrite
-
-### Primary goal
-Two or more browser tabs can edit the same markdown document at the same time at normal typing speed without corruption.
-
-### Secondary goals
-- owner editor uses collaborative core
-- public shared preview remains read-only comment mode for now
-- CLI still works for list/search/read/edit/update/delete
-- API key flow still works
-- comments still work on top of current markdown rendering model
-- server still writes `.md` file as a derived artifact for convenience
-
-## Final architecture to implement
-
-## 1. Source of truth
-
-The source of truth for a note must be:
-- `IdList` from articulated
-- char storage keyed by element id
-- append-only mutation log or update log if useful
-
-The plain markdown string is derived.
-
-The `.md` file is a derived artifact written during persistence. It is not authoritative.
-
-## 2. Note storage format
-
-Keep one note per id:
-- `data/notes/<id>.md`
-- `data/notes/<id>.json`
-
-The JSON should contain:
-- title
-- shareId
-- timestamps
-- comment threads
-- saved collaborative state
-
-Suggested JSON shape:
-
-```json
-{
-  "id": "abc123",
-  "title": "untitled",
-  "shareId": "...",
-  "createdAt": "...",
-  "updatedAt": "...",
-  "threads": [],
-  "collab": {
-    "idListState": [...],
-    "chars": [
-      { "bunchId": "...", "startCounter": 0, "chars": "hello" }
-    ],
-    "serverCounter": 42
-  }
-}
-```
-
-No backward compat needed. If old notes exist without collab state, convert markdown to collab state on load.
-
-## 3. Client mutations
-
-The browser must send semantic mutations, not raw low-level patches.
-
-Start with only two mutation kinds:
-
-```ts
-type ClientMutation =
-  | {
-      name: "insert";
-      args: {
-        before: ElementId | null;
-        id: ElementId;
-        content: string;
-        isInWord: boolean;
-      };
-      clientCounter: number;
-    }
-  | {
-      name: "delete";
-      args: {
-        startId: ElementId;
-        endId?: ElementId;
-        contentLength?: number;
-      };
-      clientCounter: number;
-    };
-```
-
-Notes:
-- use `beforeinput`
-- do not diff full strings as primary mechanism
-- derive mutation directly from selection and input intent where possible
-- fallback diffing is acceptable only for weird composition edge cases if needed
-
-## 4. Server application model
-
-The server must:
-- receive mutations over WebSocket
-- apply them to authoritative note state
-- use a tracked IdList wrapper that records actual structural updates
-- derive new markdown string
-- persist note
-- broadcast canonical server updates to all clients
-
-Do not broadcast client intent as truth.
-
-Server update payload should look something like:
-
-```ts
-type ServerMessage =
-  | {
-      type: "hello";
-      noteId: string;
-      title: string;
-      shareId: string;
-      markdown: string;
-      idListState: SavedIdList;
-      serverCounter: number;
-    }
-  | {
-      type: "mutation";
-      senderId: string;
-      senderCounter: number;
-      serverCounter: number;
-      markdown: string;
-      idListUpdates: IdListUpdate[];
-    };
-```
-
-For the first working version, sending the full markdown with every server mutation is acceptable.
-
-That makes reconciliation much easier. Optimize later.
-
-## 5. Client reconciliation model
-
-The client must maintain:
-- `serverText`
-- `serverIdList`
-- `pendingMutations`
-- current textarea state derived from `serverText + pendingMutations`
-
-When a server mutation arrives:
-1. apply server update to confirmed server state
-2. drop confirmed local mutations if `senderId === clientId` and `senderCounter` reached
-3. rebuild local state by replaying remaining pending mutations on top of confirmed state
-4. restore selection using id-based selection mapping
-
-This is the core thing to get right.
-
-## 6. Selection preservation
-
-Implement selection tracking in ID-space, like the demo.
-
-At minimum support:
-- cursor selection
-- text range selection
-
-Need helper conversions:
-- `selectionToIds(state)`
-- `selectionFromIds(selectionIds, state)`
-
-Since we use textarea, the selection mapping is simpler than ProseMirror:
-- map visible character indices to ids via `IdList.at`
-- restore cursor/range using `IdList.indexOf`
-
-## 7. Tracked IdList wrapper
-
-Implement a small mutable wrapper around `IdList` similar to:
-- `/tmp/articulated-demos/semantic-rebasing/src/common/tracked_id_list.ts`
-
-For our use case it should record updates like:
+## Problem and approach
 
-```ts
-type IdListUpdate =
-  | { type: "insertAfter"; before: ElementId | null; id: ElementId; count: number }
-  | { type: "deleteRange"; startIndex: number; endIndex: number };
-```
-
-The server uses this to produce canonical updates for clients.
-
-## 8. Character storage
-
-Use compressed bunch storage server-side for persistence, but in-memory you can use:
-- `Map<string, string>` keyed by `bunchId:counter`
-
-This is fine.
-
-If easier for first pass, also keep an in-memory visible string cache.
-
-## 9. REST API after rewrite
-
-Keep these routes usable:
-- `GET /api/notes`
-- `GET /api/notes/:id`
-- `GET /api/notes/:id?offset=...&limit=...`
-- `POST /api/notes`
-- `POST /api/notes/:id/edit`
-- `PUT /api/notes/:id` for title updates and full markdown replacement
-- `DELETE /api/notes/:id`
-- `GET/POST/DELETE /api/keys`
-
-But note:
-- REST edit/update must internally convert requested text changes into mutations or rebuild authoritative collab state cleanly
-- no direct markdown mutation bypassing collab source of truth
-
-Acceptable shortcut for `PUT markdown`:
-- rebuild note collab state from full markdown replacement
-
-Acceptable shortcut for `POST /edit`:
-- find text range in current markdown
-- convert to delete mutation + insert mutation
-
-## 10. Comments
-
-Do not touch comments much in the rewrite.
-
-Keep current comment system:
-- text-quote anchors
-- reply tree UI
-- modal behavior
-- shared/public comment flows
-
-Only ensure comments continue to work against derived markdown text.
-
-## 11. UI behavior after rewrite
-
-### Editor mode
-- collaborative textarea on left
-- rendered preview on right
-- same mobile preview overlay behavior
-- comments unchanged for now
-
-### Public mode
-- read-only preview
-- comments only
-- no collaborative editing yet
-
-## 12. WebSocket auth
-
-For now, owner editor connections can stay cookie-authenticated.
-
-Do not add public collaborative editing in this rewrite.
-
-So WS server can remain simple for owner note editing.
-
-## 13. Step-by-step execution order
-
-### Step 1
-Create a proper shared module for collaborative state and updates:
-- `src/collab.ts`
-- maybe `public/collab-shared.js` or inline equivalents for browser
-
-### Step 2
-Implement `TrackedIdList` wrapper in server and browser.
-
-### Step 3
-Refactor server note model to make collab state authoritative.
-
-### Step 4
-Replace current WS protocol:
-- remove generic `updated`-for-text logic
-- add mutation hello/ack/broadcast model
-
-### Step 5
-Replace `public/collab-editor.js` completely.
-Do not patch the current file. Rewrite it cleanly.
-
-### Step 6
-Wire editor mode in `public/app.js` to use the new collab editor.
-
-### Step 7
-Keep preview rendering server-side through `/api/render` initially.
-That is fine.
-
-### Step 8
-Test in two tabs:
-- normal typing speed
-- backspace
-- paste
-- newline
-- word delete
-- editing in the middle of a line
-- both users typing in different places
-- both users typing in same word
-
-### Step 9
-Then make CLI edits still work.
-
-## 14. Acceptance criteria
-
-The rewrite is only done when all of this holds:
-
-1. Typing at normal speed does not drop/reorder characters.
-2. Two tabs editing same note converge correctly.
-3. No REST reload loop interferes with typing.
-4. Cursor is stable during remote updates.
-5. Backspace/delete/paste/newline work.
-6. `.md` stays up to date on disk.
-7. Existing comments still render and can be added.
-8. Local CLI can still list/search/read/edit/update/delete.
-
-## 15. Current commands / environment
-
-Local dev server:
-```bash
-cd /Users/badlogic/workspaces/jot
-npm run build
-node dist/server.js
-```
-
-CLI:
-```bash
-node cli/jot.mjs instances
-node cli/jot.mjs local list
-node cli/jot.mjs local read <id>
-```
-
-Remote deploy target:
-- host: `slayer.marioslab.io`
-- app path: `~/jot`
-- domain: `https://jot.mariozechner.at`
-
-Deploy command on server:
-```bash
-ssh slayer "cd ~/jot && git pull && cd docker && bash control.sh start"
-```
-
-## 16. Important instruction
-
-Do not waste time on polishing UI until the collaborative core is stable.
-
-Do not do more cosmetic patches to the current broken editor.
-
-Rewrite the collaborative editor and WS flow properly first.
-
-Then test aggressively.
-
-Then continue.
+Add a shared AI layer to Jot using the GitHub Copilot SDK without taking on GitHub-backed storage yet. The first implementation should treat the current note as shared context, keep one **logical shared conversation** per note, stream AI output to connected editor participants, and keep AI-generated document changes reviewable and attributable instead of silently editing the note.
+
+Assumptions for this phase:
+
+- Notes remain Jot-managed notes for now; repo-backed file storage is out of scope.
+- The server remains authoritative for document mutations and AI state.
+- The AI layer is collaborative by default: one shared conversation and one shared proposal set per note.
+- The first implementation is intentionally conservative:
+  - prompting and live streaming are limited to owner and `edit` participants
+  - `view` and `comment` participants can read persisted completed conversation/proposal state, but do not prompt or receive live AI streaming in v1
+  - broadening AI access to `comment` users requires a separate transport path plus rate-limiting and audit controls
+- Non-trivial AI edits land as proposals that collaborators explicitly accept or reject.
+
+## Phases
+
+### Phase 1 — Shared conversation backbone
+
+Goal: create one shared, multi-turn AI conversation per note without coupling it to note-save churn or stale document snapshots.
+
+Implementation shape:
+
+- Add a server-side AI runtime manager keyed by `noteId`.
+- Integrate the GitHub Copilot SDK in Node/TypeScript, but treat the SDK session as a runtime detail rather than the durable source of truth for conversation state.
+- Keep one **logical shared conversation** per note, persisted separately from note metadata in adjacent AI state such as `data/notes/<noteId>.ai.json`.
+- Persist AI state independently from note persistence so normal collaborative typing does not rewrite growing AI history on every keystroke.
+- Treat the current note markdown as **ephemeral per-turn context**, not durable chat history. Rebuild or refresh the Copilot session from bounded transcript + current note snapshot as needed so old note snapshots do not accumulate inside a long-lived session.
+- Add a per-note run queue/lock in this phase so prompt submission is serialized from the first prompt-capable version.
+- Add authenticated/share-aware endpoints for:
+  - listing shared conversation history
+  - posting a prompt into the shared conversation
+  - clearing or resetting the shared conversation
+- Scope prompt submission in v1 to owner and `edit` access only.
+
+Likely code surfaces:
+
+- `src/server.ts` for API/WebSocket orchestration and access control
+- new server module such as `src/ai.ts` or `src/copilot.ts` for Copilot SDK runtime, prompt queueing, and persistence
+- separate AI persistence types/files rather than note metadata
+- `public/app.js` for the shared chat panel and prompt submission UX
+
+Exit criteria:
+
+- An editor participant can open a note, see prior AI turns for that note, submit a prompt, and the shared conversation state survives reconnects and restarts.
+- Prompt execution is serialized per note before any streaming work begins.
+
+### Phase 2 — Streaming response fan-out
+
+Goal: stream Copilot output progressively to connected editor participants in the active note.
+
+Implementation shape:
+
+- Subscribe to Copilot SDK streaming events for assistant deltas and turn lifecycle.
+- Add a dedicated AI event path to the existing realtime layer instead of assuming existing `public-viewer` connections can consume AI traffic.
+- In v1, broadcast AI deltas, tool activity, completion, failure, and cancellation to the owner/editor/public-editor connections that already participate in rich realtime note activity.
+- Keep AI events separate from document mutation events.
+- Add reconnect behavior so refreshed editor clients can rebuild the in-progress or latest completed assistant turn.
+- Expose completed turn state through non-streaming APIs so non-editor viewers can still read durable conversation state.
+
+Likely code surfaces:
+
+- `src/server.ts` WebSocket message types and note-scoped AI broadcast paths
+- new AI integration module for SDK event mapping
+- `public/app.js` for streaming UI state, turn assembly, loading/cancel UX
+
+Exit criteria:
+
+- When an editor participant prompts the AI, every connected editor participant in that note sees the answer stream in real time and the final assistant turn is durable.
+
+### Phase 3 — Visible AI collaborator identity
+
+Goal: make AI conversation activity visible and attributable as a first-class collaborator.
+
+Implementation shape:
+
+- Introduce an explicit AI participant identity per note, including display name, avatar styling, and event attribution.
+- Render AI turns and AI-originated activity distinctly from human chat/comments.
+- Add AI activity to existing collaboration surfaces where it helps comprehension:
+  - conversation timeline
+  - optional activity/status indicator in the editor shell
+- Prepare attribution fields that Phase 4 can reuse for proposals and accepted edits.
+- Keep AI presence out of cursor/presence overlays in v1 unless a later pass shows clear value.
+
+Likely code surfaces:
+
+- `public/app.js` UI rendering and activity labeling
+- shared message/event typing in server/client protocol
+- separate AI state schema for stable attribution metadata
+
+Exit criteria:
+
+- Collaborators can always tell which conversation turns and activity states came from the AI.
+- The identity model is ready to attribute future proposals and accepted edits.
+
+### Phase 4 — Reviewable AI edit proposals
+
+Goal: make AI edits reviewable and explicit before they touch the note.
+
+Implementation shape:
+
+- Define a proposal model for AI-generated edits that is separate from the live document until accepted.
+- Use a **text-first, anchor-backed proposal format** rather than storing raw CRDT mutations. Each proposal hunk should carry:
+  - `oldText`
+  - `newText`
+  - an anchor object such as `{ quote, prefix, suffix }`
+  - optional metadata such as `summary`, `sourceTurnId`, and informational `baseServerCounter`
+- Store proposals in a review-friendly form with a readable diff. The AI proposes text changes; it does not directly emit authoritative editor mutations.
+- Add proposal UX in the editor:
+  - show proposed change summary/diff
+  - accept
+  - reject
+  - keep v1 all-or-nothing per proposal rather than partial apply
+- On accept, resolve each proposal hunk against the **current** markdown using the stored anchors, then translate the resolved range into normal delete/insert mutations through the existing server-authoritative collab path.
+- If a hunk cannot be resolved uniquely at accept-time, mark the proposal stale instead of guessing.
+- Keep accepted/rejected status and AI attribution visible in the shared conversation history.
+
+Likely code surfaces:
+
+- `src/server.ts` for proposal creation, storage, acceptance, and broadcast
+- `src/collab.ts` for mapping resolved accepted ranges into mutation-safe operations
+- `public/app.js` for review UI and proposal state
+
+Exit criteria:
+
+- The AI can propose a meaningful text change, collaborators can review it without it auto-applying, and accepting it updates the note through the normal collab path with AI attribution.
+
+### Phase 5 — Stale proposal detection and safe apply
+
+Goal: prevent AI proposals from applying when their target region no longer matches the live note.
+
+Implementation shape:
+
+- Stamp every proposal with target-region information captured from generation-time state, including its anchor context and any resolved range metadata that helps later validation.
+- Make stale detection **range-aware first**:
+  - validate that the target text is still uniquely resolvable via `quote/prefix/suffix`
+  - validate that the corresponding current range still matches what the proposal expects
+  - use global note version or `serverCounter` only as supplementary context, not as the primary stale gate
+- Do not mark a proposal stale just because unrelated edits happened elsewhere in the note.
+- If validation fails, mark the proposal stale and block direct apply.
+- Surface a clear stale state in the UI and allow regenerate/revise from current note content instead of forcing unsafe application.
+- Keep the first implementation conservative: no auto-rebasing of stale proposals.
+
+Likely code surfaces:
+
+- `src/server.ts` proposal validation and stale-state transitions
+- `src/collab.ts` range validation helpers if needed
+- `public/app.js` stale proposal messaging and regenerate actions
+
+Exit criteria:
+
+- AI proposals that still match their target region can be applied even if unrelated edits happened elsewhere in the note.
+- AI proposals whose target region is missing, ambiguous, or meaningfully changed are visibly marked stale and cannot be applied as if they were still valid.
+
+## Todo map
+
+1. `ai-shared-session-foundation` — Add note-scoped Copilot runtime/session management, separate AI persistence, per-note run serialization, and shared conversation APIs.
+2. `ai-streaming-protocol` — Add note-scoped AI streaming events and editor-participant fan-out without relying on existing viewer connections for realtime AI traffic.
+3. `ai-visible-attribution` — Add first-class AI identity, attribution, and activity rendering in the client.
+4. `ai-reviewable-proposals` — Add anchored text proposal data models, review UI, and accept-time translation into normal collaborative mutations.
+5. `ai-stale-proposal-guardrails` — Add range-aware validation and stale marking before proposal application, using global version only as secondary context.
+
+## Notes and considerations
+
+- The current monolithic `src/server.ts` can support an initial slice, but extracting the Copilot SDK integration into a dedicated server module should happen immediately to avoid further entangling note, auth, WebSocket, and AI concerns.
+- The existing collaboration model is a good fit for AI proposals because the server already owns mutation application and clients already reconcile against authoritative state.
+- The first release should avoid letting the AI write directly into the note stream while generating. Streaming text belongs in the conversation layer; document mutations should stay proposal-based until explicitly accepted.
+- Do not persist AI history inside note metadata. AI state must live in its own persistence unit so collaborative typing does not rewrite growing AI blobs on every note save.
+- The first release should treat note content as replaceable turn context, not durable chat transcript content inside a long-lived SDK session.
+- Existing share access levels imply likely AI permissions in v1:
+  - `view`: read persisted conversation/proposal state only
+  - `comment`: read persisted conversation/proposal state only
+  - `edit`: prompt AI, receive live streaming, review proposals, and apply accepted proposals
+- If later expanding prompting or live streaming beyond `edit`, add a dedicated non-editor AI transport path plus rate limiting, audit logging, and quota-abuse controls first.
+- Persistence format should leave room for future repo-backed context, tool traces, and richer proposal metadata without forcing a migration immediately afterward.
