@@ -104,6 +104,12 @@ export type CollabState = {
   serverCounter: number;
 };
 
+export type RangeReplacement = {
+  start: number;
+  end: number;
+  newText: string;
+};
+
 export class TrackedIdList {
   private _idList: IdList;
   private updates: IdListUpdate[] = [];
@@ -345,6 +351,61 @@ export function applyClientMutations(state: CollabState, mutations: ClientMutati
     state: nextState,
     markdown: collabToMarkdown(nextState),
     idListUpdates,
+    changed: idListUpdates.length > 0,
+  };
+}
+
+export function applyRangeReplacements(state: CollabState, replacements: RangeReplacement[]) {
+  let workingState = state;
+  let markdown = collabToMarkdown(state);
+  const idListUpdates: IdListUpdate[] = [];
+  let senderCounter = 0;
+
+  for (const replacement of replacements) {
+    if (!Number.isInteger(replacement.start) || !Number.isInteger(replacement.end) || replacement.start < 0 || replacement.end < replacement.start || replacement.end > markdown.length) {
+      throw new Error("Invalid replacement range.");
+    }
+
+    let nextClientCounter = senderCounter + 1;
+    const mutations: ClientMutation[] = [];
+
+    if (replacement.end > replacement.start) {
+      mutations.push({
+        name: "delete",
+        clientCounter: nextClientCounter++,
+        args: {
+          startId: idAtIndex(workingState, replacement.start),
+          endId: idAtIndex(workingState, replacement.end - 1),
+          contentLength: replacement.end - replacement.start,
+        },
+      });
+    }
+
+    if (replacement.newText.length > 0) {
+      mutations.push({
+        name: "insert",
+        clientCounter: nextClientCounter++,
+        args: {
+          before: replacement.start > 0 ? idBeforeIndex(workingState, replacement.start) : null,
+          id: { bunchId: crypto.randomUUID(), counter: 0 },
+          content: replacement.newText,
+          isInWord: false,
+        },
+      });
+    }
+
+    const result = applyClientMutations(workingState, mutations);
+    workingState = result.state;
+    markdown = result.markdown;
+    idListUpdates.push(...result.idListUpdates);
+    senderCounter = mutations.at(-1)?.clientCounter || senderCounter;
+  }
+
+  return {
+    state: workingState,
+    markdown,
+    idListUpdates,
+    senderCounter,
     changed: idListUpdates.length > 0,
   };
 }

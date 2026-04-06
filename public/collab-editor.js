@@ -114,7 +114,7 @@ function measureCaretPositions(textarea, mirror, indices) {
 // ---- Main editor ----
 
 export function createCollabEditor(textarea, opts) {
-  const { noteId, shareId, name, onReady, onTextChange, onConnectionChange, onThreadsUpdated } = opts;
+  const { noteId, shareId, name, onReady, onTextChange, onConnectionChange, onThreadsUpdated, onServerMessage } = opts;
   let nextBunchIdCounter = 0;
 
   let ws = null;
@@ -431,6 +431,7 @@ export function createCollabEditor(textarea, opts) {
       else if (msg.type === "presence") receivePresence(msg);
       else if (msg.type === "presence-leave") receivePresenceLeave(msg);
       else if (msg.type === "threads-updated") onThreadsUpdated?.();
+      else onServerMessage?.(msg);
     });
     ws.addEventListener("close", () => {
       if (destroyed) return;

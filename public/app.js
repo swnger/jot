@@ -110,6 +110,9 @@
     showResolved: false,
     showComments: true,
     modalOpen: false,
+    aiPanelOpen: false,
+    ai: null,
+    aiDraft: "",
   };
 
   if (page === "list") {
@@ -329,6 +332,7 @@
     const resolvedButton = document.getElementById("resolvedButton");
     const commentsButton = document.getElementById("commentsButton");
     const logoutButton = document.getElementById("logoutButton");
+    const aiButton = document.getElementById("aiButton");
     const saveStatus = document.getElementById("saveStatus");
     const commenterLabel = document.getElementById("commenterLabel");
     const commentFab = document.getElementById("commentFab");
@@ -352,6 +356,7 @@
       resolvedButton,
       commentsButton,
       logoutButton,
+      aiButton,
       saveStatus,
       commenterLabel,
       commentFab,
@@ -377,6 +382,10 @@
         e.stopPropagation();
         toggleSharePopover(refs);
       });
+    }
+
+    if (aiButton) {
+      aiButton.addEventListener("click", () => openAiPanel(refs, isPublic));
     }
 
     const agentButton = document.getElementById("agentButton");
@@ -443,6 +452,9 @@
           },
           onThreadsUpdated: () => {
             reloadThreads(isPublic);
+          },
+          onServerMessage: (msg) => {
+            handleAiServerMessage(msg, refs, isPublic);
           },
         });
       });
@@ -644,6 +656,10 @@
             reloadThreads(publicMode);
             return;
           }
+          if (msg.type === "ai-state-updated" || msg.type === "ai-message-delta" || msg.type === "ai-tool-activity") {
+            handleAiServerMessage(msg, refsArg, publicMode);
+            return;
+          }
           if (msg.type !== "updated") {
             return;
           }
@@ -674,6 +690,7 @@
       state.note.updatedAt = payload.note.updatedAt;
       state.threads = payload.threads;
       state.viewer = payload.viewer;
+      state.ai = payload.ai || state.ai;
 
       if (publicMode) {
         state.note.markdown = payload.note.markdown;
@@ -705,6 +722,10 @@
       if (refsArg.commenterLabel) {
         refsArg.commenterLabel.textContent = payload.viewer.commenterName || "anonymous";
       }
+      renderAiButton(refsArg);
+      if (state.aiPanelOpen) {
+        renderAiPanel(refsArg, publicMode);
+      }
       syncThreadLayout(refsArg);
     }
 
@@ -720,8 +741,13 @@
         const payload = await api(endpoint);
         state.viewer = payload.viewer;
         state.threads = payload.threads;
+        state.ai = payload.ai || state.ai;
         if (refs.commenterLabel) {
           refs.commenterLabel.textContent = payload.viewer.commenterName ? payload.viewer.commenterName : "anonymous";
+        }
+        renderAiButton(refs);
+        if (state.aiPanelOpen) {
+          renderAiPanel(refs, publicMode);
         }
         syncThreadLayout(refs);
         refreshOpenThreadDialog(refs, publicMode);
@@ -734,6 +760,7 @@
       state.note = payload.note;
       state.viewer = payload.viewer;
       state.threads = payload.threads;
+      state.ai = payload.ai || null;
 
       if (refsArg.topbarTitle) {
         refsArg.topbarTitle.textContent = payload.note.title || "untitled";
@@ -751,6 +778,7 @@
       if (refsArg.saveStatus) {
         refsArg.saveStatus.textContent = publicMode ? "" : "Saved";
       }
+      renderAiButton(refsArg);
       updateResolvedButton(refsArg.resolvedButton);
       updateCommentsButton(refsArg.commentsButton);
       syncThreadLayout(refsArg);
@@ -780,6 +808,7 @@
             <span class="status-text" id="saveStatus"></span>
           </div>
           <div class="topbar-right">
+            <button type="button" class="ai-toggle" id="aiButton">AI</button>
             <jot-icon-button icon="preview" label="Preview" id="previewFab"></jot-icon-button>
             <jot-icon-button icon="robot" label="Agent setup" id="agentButton"></jot-icon-button>
             <div class="share-popover-wrap" id="sharePopoverWrap">
@@ -836,6 +865,7 @@
             </div>
           </div>
           <div class="topbar-right">
+            <button type="button" class="ai-toggle" id="aiButton">AI</button>
             <jot-icon-button icon="robot" label="Agent setup" id="agentButton"></jot-icon-button>
             <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
           </div>
@@ -868,6 +898,7 @@
             <span class="status-text" id="saveStatus"></span>
           </div>
           <div class="topbar-right">
+            <button type="button" class="ai-toggle" id="aiButton">AI</button>
             <jot-icon-button icon="preview" label="Preview" id="previewFab"></jot-icon-button>
             <jot-icon-button icon="robot" label="Agent setup" id="agentButton"></jot-icon-button>
             <button type="button" class="jot-btn-icon jot-btn-icon--md theme-toggle" aria-label="Toggle theme">${themeIcon(document.documentElement.getAttribute("data-theme") || "dark")}</button>
@@ -1068,6 +1099,353 @@
     if (!el) return;
     const btn = el.querySelector("button") || el;
     btn.textContent = text;
+  }
+
+  function aiBasePath(publicMode) {
+    return publicMode ? `/api/share/${shareId}/ai` : `/api/notes/${noteId}/ai`;
+  }
+
+  function renderAiButton(refs) {
+    if (!refs.aiButton) return;
+    const ai = state.ai;
+    const openCount = ai?.proposals?.filter((proposal) => proposal.status === "open").length || 0;
+    const isWorking = Boolean(ai?.activeRun);
+    refs.aiButton.textContent = isWorking ? "AI working" : openCount > 0 ? `AI (${openCount})` : "AI";
+    refs.aiButton.classList.toggle("active", isWorking);
+    refs.aiButton.classList.toggle("has-open", !isWorking && openCount > 0);
+  }
+
+  async function reloadAiState(publicMode, refs) {
+    try {
+      const payload = await api(aiBasePath(publicMode));
+      state.ai = payload.ai;
+      renderAiButton(refs);
+      if (state.aiPanelOpen) {
+        renderAiPanel(refs, publicMode);
+      }
+    } catch (error) {
+      console.error("Failed to reload AI state:", error);
+    }
+  }
+
+  function applyAiDelta(msg, refs, publicMode) {
+    if (!state.ai) {
+      reloadAiState(publicMode, refs);
+      return;
+    }
+    if (!state.ai.activeRun || state.ai.activeRun.id !== msg.runId) {
+      reloadAiState(publicMode, refs);
+      return;
+    }
+    state.ai.activeRun.content = msg.content || "";
+    state.ai.activeRun.updatedAt = new Date().toISOString();
+    const turn = state.ai.turns.find((item) => item.id === msg.assistantTurnId);
+    if (turn) {
+      turn.content = msg.content || "";
+      turn.updatedAt = state.ai.activeRun.updatedAt;
+    }
+    renderAiButton(refs);
+    if (state.aiPanelOpen) {
+      renderAiPanel(refs, publicMode);
+    }
+  }
+
+  function applyAiToolActivity(msg, refs, publicMode) {
+    if (!state.ai) {
+      reloadAiState(publicMode, refs);
+      return;
+    }
+    if (!state.ai.activeRun || state.ai.activeRun.id !== msg.runId) {
+      reloadAiState(publicMode, refs);
+      return;
+    }
+    const existing = state.ai.activeRun.toolActivities.find((item) => item.toolCallId === msg.activity.toolCallId);
+    if (existing) {
+      Object.assign(existing, msg.activity);
+    } else {
+      state.ai.activeRun.toolActivities.push(msg.activity);
+    }
+    if (state.aiPanelOpen) {
+      renderAiPanel(refs, publicMode);
+    }
+  }
+
+  function handleAiServerMessage(msg, refs, publicMode) {
+    if (msg.type === "ai-state-updated") {
+      reloadAiState(publicMode, refs);
+      return;
+    }
+    if (msg.type === "ai-message-delta") {
+      applyAiDelta(msg, refs, publicMode);
+      return;
+    }
+    if (msg.type === "ai-tool-activity") {
+      applyAiToolActivity(msg, refs, publicMode);
+    }
+  }
+
+  function openAiPanel(refs, publicMode) {
+    renderAiPanel(refs, publicMode);
+  }
+
+  function renderAiProposal(proposal, ai) {
+    const canManage = ai.permissions?.canManageProposals;
+    const canPrompt = ai.permissions?.canPrompt;
+    const canAccept = proposal.status === "open" && canManage;
+    const canReject = (proposal.status === "open" || proposal.status === "stale") && canManage;
+    const meta = proposal.status === "accepted" && proposal.acceptedBy
+      ? `Accepted by ${proposal.acceptedBy.name}`
+      : proposal.status === "rejected" && proposal.rejectedBy
+        ? `Rejected by ${proposal.rejectedBy.name}`
+        : proposal.status === "stale" && proposal.staleReason
+          ? proposal.staleReason
+          : `${proposal.hunks.length} hunk${proposal.hunks.length === 1 ? "" : "s"}`;
+
+    return `
+      <div class="ai-proposal ai-proposal--${escapeHtml(proposal.status)}">
+        <div class="ai-proposal-head">
+          <div>
+            <div class="ai-proposal-title">${escapeHtml(proposal.summary)}</div>
+            <div class="ai-proposal-meta">${escapeHtml(meta)}</div>
+          </div>
+          <span class="ai-proposal-badge">${escapeHtml(proposal.status)}</span>
+        </div>
+        <div class="ai-proposal-hunks">
+          ${proposal.hunks.map((hunk) => `
+            <div class="ai-proposal-hunk">
+              <div class="ai-proposal-diff">
+                <div>
+                  <div class="ai-proposal-diff-label">Before</div>
+                  <pre>${escapeHtml(hunk.oldText)}</pre>
+                </div>
+                <div>
+                  <div class="ai-proposal-diff-label">After</div>
+                  <pre>${escapeHtml(hunk.newText)}</pre>
+                </div>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+        <div class="ai-proposal-actions">
+          ${canAccept ? `<button type="button" class="ai-action-btn primary" data-ai-accept="${escapeHtml(proposal.id)}">Accept</button>` : ""}
+          ${canReject ? `<button type="button" class="ai-action-btn" data-ai-reject="${escapeHtml(proposal.id)}">Reject</button>` : ""}
+          ${canPrompt ? `<button type="button" class="ai-action-btn" data-ai-revise="${escapeHtml(proposal.id)}">Revise</button>` : ""}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderAiTurn(turn, ai) {
+    const proposals = (turn.proposalIds || [])
+      .map((proposalId) => ai.proposals.find((proposal) => proposal.id === proposalId))
+      .filter(Boolean);
+    const authorName = turn.role === "assistant" ? (ai.identity?.name || "Jot AI") : (turn.author?.name || "Collaborator");
+    const status = turn.status !== "completed" ? ` <span class="ai-turn-status">${escapeHtml(turn.status)}</span>` : "";
+    const error = turn.error ? `<div class="ai-turn-error">${escapeHtml(turn.error)}</div>` : "";
+    return `
+      <div class="ai-turn ai-turn--${escapeHtml(turn.role)}">
+        <div class="ai-turn-head">
+          <span class="ai-turn-author">${escapeHtml(authorName)}</span>
+          <span class="ai-turn-meta">${escapeHtml(formatRelativeTime(turn.updatedAt || turn.createdAt))}${status}</span>
+        </div>
+        <div class="ai-turn-body">${escapeHtml(turn.content || "")}</div>
+        ${error}
+        ${proposals.length ? `<div class="ai-turn-proposals">${proposals.map((proposal) => renderAiProposal(proposal, ai)).join("")}</div>` : ""}
+      </div>
+    `;
+  }
+
+  function renderAiPanel(refs, publicMode) {
+    if (!refs.modalBackdrop) return;
+    state.modalOpen = true;
+    state.aiPanelOpen = true;
+
+    const ai = state.ai || {
+      identity: { name: "Jot AI" },
+      turns: [],
+      proposals: [],
+      activeRun: null,
+      queueDepth: 0,
+      permissions: {
+        canPrompt: false,
+        canCancel: false,
+        canReset: false,
+        canManageProposals: false,
+        canViewLive: false,
+      },
+    };
+
+    const activeRun = ai.activeRun;
+    const activeTurn = activeRun ? ai.turns.find((turn) => turn.id === activeRun.assistantTurnId) : null;
+    const activeTurnProposals = activeTurn
+      ? (activeTurn.proposalIds || [])
+          .map((proposalId) => ai.proposals.find((proposal) => proposal.id === proposalId))
+          .filter(Boolean)
+      : [];
+    const toolActivities = activeRun?.toolActivities || [];
+    const visibleTurns = activeRun ? ai.turns.filter((turn) => turn.id !== activeRun.assistantTurnId) : ai.turns;
+    const emptyState = visibleTurns.length === 0
+      ? '<div class="ai-empty-state">No shared AI conversation yet.</div>'
+      : visibleTurns.map((turn) => renderAiTurn(turn, ai)).join("");
+    const viewerHint = ai.permissions.canPrompt
+      ? "The current note is included automatically with each prompt."
+      : "Editors can ask Jot AI here. You can still review completed turns and proposals.";
+
+    refs.modalBackdrop.classList.remove("hidden");
+    refs.modalBackdrop.innerHTML = `
+      <div class="modal ai-panel-modal" role="dialog" aria-modal="true">
+        <div class="ai-panel">
+          <div class="ai-panel-header">
+            <div>
+              <h2 class="settings-title">Jot AI</h2>
+              <div class="ai-panel-subtitle">${escapeHtml(viewerHint)}</div>
+            </div>
+            <div class="ai-panel-header-actions">
+              <button type="button" class="ai-action-btn" id="aiRefreshBtn">Refresh</button>
+              ${ai.permissions.canReset ? '<button type="button" class="ai-action-btn" id="aiResetBtn">Reset</button>' : ""}
+              <jot-icon-button icon="close" label="Close" id="aiPanelClose"></jot-icon-button>
+            </div>
+          </div>
+          <div class="ai-panel-conversation" id="aiPanelConversation">
+            ${emptyState}
+            ${activeRun && ai.permissions.canViewLive ? `
+              <div class="ai-live-run">
+                <div class="ai-live-run-head">
+                  <span class="ai-turn-author">${escapeHtml(ai.identity?.name || "Jot AI")}</span>
+                  <span class="ai-turn-meta">${activeRun.status === "cancelling" ? "Cancelling" : "Streaming"}</span>
+                </div>
+                <div class="ai-turn-body">${escapeHtml(activeRun.content || "")}</div>
+                ${toolActivities.length ? `
+                  <div class="ai-tool-list">
+                    ${toolActivities.map((activity) => `
+                      <div class="ai-tool-item ai-tool-item--${escapeHtml(activity.status)}">
+                        <span>${escapeHtml(activity.toolName)}</span>
+                        <span>${escapeHtml(activity.status)}</span>
+                      </div>
+                    `).join("")}
+                  </div>
+                ` : ""}
+                ${activeTurnProposals.length ? `<div class="ai-turn-proposals">${activeTurnProposals.map((proposal) => renderAiProposal(proposal, ai)).join("")}</div>` : ""}
+              </div>
+            ` : ""}
+          </div>
+          <div class="ai-panel-footer">
+            ${ai.permissions.canPrompt ? `
+              <form id="aiPromptForm" class="ai-prompt-form">
+                <textarea id="aiPromptInput" class="ai-prompt-input" placeholder="Ask Jot AI to draft, revise, summarize, or propose changes...">${escapeHtml(state.aiDraft)}</textarea>
+                <div class="ai-prompt-actions">
+                  <span class="ai-panel-subtitle">${ai.queueDepth > 0 ? "Wait for the current AI turn to finish." : "Shared conversation for this note."}</span>
+                  <div class="ai-prompt-buttons">
+                    ${ai.permissions.canCancel && activeRun ? '<button type="button" class="ai-action-btn" id="aiCancelBtn">Cancel</button>' : ""}
+                    <button type="submit" class="ai-action-btn primary" id="aiSendBtn" ${ai.queueDepth > 0 ? "disabled" : ""}>Send</button>
+                  </div>
+                </div>
+              </form>
+            ` : ""}
+          </div>
+        </div>
+      </div>
+    `;
+
+    const close = () => closeModal(refs);
+    refs.modalBackdrop.querySelector("#aiPanelClose")?.addEventListener("click", close);
+    refs.modalBackdrop.onclick = (event) => {
+      if (event.target === refs.modalBackdrop) {
+        close();
+      }
+    };
+
+    refs.modalBackdrop.querySelector("#aiRefreshBtn")?.addEventListener("click", () => reloadAiState(publicMode, refs));
+    refs.modalBackdrop.querySelector("#aiResetBtn")?.addEventListener("click", async () => {
+      if (!confirm("Clear the shared AI conversation and proposals for this note?")) return;
+      try {
+        const payload = await api(`${aiBasePath(publicMode)}/reset`, { method: "POST" });
+        state.ai = payload.ai;
+        renderAiButton(refs);
+        renderAiPanel(refs, publicMode);
+      } catch (error) {
+        alert(error.message || "Failed to reset AI state.");
+      }
+    });
+    refs.modalBackdrop.querySelector("#aiCancelBtn")?.addEventListener("click", async () => {
+      try {
+        const payload = await api(`${aiBasePath(publicMode)}/cancel`, { method: "POST" });
+        state.ai = payload.ai;
+        renderAiButton(refs);
+        renderAiPanel(refs, publicMode);
+      } catch (error) {
+        alert(error.message || "Failed to cancel the AI run.");
+      }
+    });
+
+    const promptInput = refs.modalBackdrop.querySelector("#aiPromptInput");
+    if (promptInput) {
+      promptInput.addEventListener("input", () => {
+        state.aiDraft = promptInput.value;
+      });
+      setTimeout(() => promptInput.focus(), 30);
+    }
+
+    refs.modalBackdrop.querySelector("#aiPromptForm")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const prompt = state.aiDraft.trim();
+      if (!prompt) return;
+      try {
+        const payload = await api(`${aiBasePath(publicMode)}/prompt`, {
+          method: "POST",
+          body: { prompt },
+        });
+        state.aiDraft = "";
+        state.ai = payload.ai;
+        renderAiButton(refs);
+        renderAiPanel(refs, publicMode);
+      } catch (error) {
+        alert(error.message || "Failed to send the AI prompt.");
+      }
+    });
+
+    refs.modalBackdrop.querySelectorAll("[data-ai-accept]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const proposalId = button.getAttribute("data-ai-accept");
+        try {
+          const payload = await api(`${aiBasePath(publicMode)}/proposals/${proposalId}/accept`, { method: "POST" });
+          state.ai = payload.ai;
+          renderAiButton(refs);
+          renderAiPanel(refs, publicMode);
+        } catch (error) {
+          alert(error.message || "Failed to accept the proposal.");
+        }
+      });
+    });
+
+    refs.modalBackdrop.querySelectorAll("[data-ai-reject]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const proposalId = button.getAttribute("data-ai-reject");
+        try {
+          const payload = await api(`${aiBasePath(publicMode)}/proposals/${proposalId}/reject`, { method: "POST" });
+          state.ai = payload.ai;
+          renderAiButton(refs);
+          renderAiPanel(refs, publicMode);
+        } catch (error) {
+          alert(error.message || "Failed to reject the proposal.");
+        }
+      });
+    });
+
+    refs.modalBackdrop.querySelectorAll("[data-ai-revise]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const proposalId = button.getAttribute("data-ai-revise");
+        const proposal = ai.proposals.find((item) => item.id === proposalId);
+        if (!proposal) return;
+        state.aiDraft = `Refresh the proposal "${proposal.summary}" against the current note and create a new reviewable proposal.`;
+        renderAiPanel(refs, publicMode);
+      });
+    });
+
+    const conversation = refs.modalBackdrop.querySelector("#aiPanelConversation");
+    if (conversation) {
+      conversation.scrollTop = conversation.scrollHeight;
+    }
   }
 
   function updateResolvedButton(button) {
@@ -1512,6 +1890,8 @@
 
   function closeModal(refs) {
     state.modalOpen = false;
+    state.aiPanelOpen = false;
+    refs.modalBackdrop.onclick = null;
     refs.modalBackdrop.classList.add("hidden");
     refs.modalBackdrop.innerHTML = "";
   }

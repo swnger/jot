@@ -20,6 +20,8 @@ Open `http://localhost:3210`. Set the owner password on first visit.
 - Inline comment threads anchored to text selections
 - Threaded replies, resolve/reopen
 - Share notes with configurable access (view, comment, edit)
+- Shared note-scoped AI conversation with live editor streaming
+- Reviewable AI edit proposals with accept/reject and stale detection
 - CLI for humans and agents (owner API keys or share links)
 - Agent setup modal with copy-paste instructions
 - Dark and light theme
@@ -103,6 +105,7 @@ data/
   notes/
     <id>.md
     <id>.json
+    <id>.ai.json
 ```
 
 The `.md` files are derived from the collaborative editing state stored in the `.json` sidecar. The JSON is the source of truth. The markdown files are written for convenience (grep, backup, external tooling).
@@ -116,9 +119,13 @@ All owner endpoints require `Authorization: Bearer <api-key>`.
 | GET    | `/api/notes?q=<query>`                | List/search notes                   |
 | POST   | `/api/notes`                          | Create note                         |
 | GET    | `/api/notes/:id`                      | Read note                           |
+| GET    | `/api/notes/:id/ai`                   | Read shared AI state                |
 | PUT    | `/api/notes/:id`                      | Update title, markdown, shareAccess |
 | DELETE | `/api/notes/:id`                      | Delete note                         |
 | POST   | `/api/notes/:id/edit`                 | Apply text edits                    |
+| POST   | `/api/notes/:id/ai/prompt`            | Submit shared AI prompt             |
+| POST   | `/api/notes/:id/ai/cancel`            | Cancel active AI run                |
+| POST   | `/api/notes/:id/ai/reset`             | Reset shared AI state               |
 | POST   | `/api/notes/:id/threads`              | Create comment thread               |
 | POST   | `/api/notes/:id/threads/:tid/replies` | Reply to thread                     |
 | PATCH  | `/api/notes/:id/threads/:tid`         | Resolve/reopen thread               |
@@ -134,8 +141,10 @@ Share endpoints (no auth, access controlled by `shareAccess`):
 | Method | Endpoint                               | Description                    |
 | ------ | -------------------------------------- | ------------------------------ |
 | GET    | `/api/share/:sid`                      | Read shared note               |
+| GET    | `/api/share/:sid/ai`                   | Read shared AI state           |
 | GET    | `/api/share/:sid/note`                 | Read shared note (lightweight) |
 | POST   | `/api/share/:sid/edit`                 | Edit (requires edit access)    |
+| POST   | `/api/share/:sid/ai/prompt`            | Prompt shared AI (edit only)   |
 | POST   | `/api/share/:sid/threads`              | Create comment                 |
 | POST   | `/api/share/:sid/threads/:tid/replies` | Reply                          |
 | POST   | `/api/share/:sid/render`               | Render markdown to HTML        |

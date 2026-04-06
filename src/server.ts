@@ -7,6 +7,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { WebSocketServer, type WebSocket } from "ws";
 
 import {
+  type RangeReplacement,
   type CollabState,
   type ClientMutation,
   type ClientMutationMessage,
@@ -17,6 +18,7 @@ import {
   type ServerPresenceMessage,
   type ServerPresenceLeaveMessage,
   applyClientMutations,
+  applyRangeReplacements,
   collabFromMarkdown,
   collabToMarkdown,
   saveCollabState,
@@ -25,6 +27,12 @@ import {
   idBeforeIndex,
   idAtIndex,
 } from "./collab.js";
+import {
+  type AiActor,
+  type AiPermissions,
+  type AiToolActivity,
+  AiRuntimeManager,
+} from "./ai.js";
 import hljs from "highlight.js";
 import { marked, type Tokens } from "marked";
 import sanitizeHtml from "sanitize-html";
@@ -138,6 +146,11 @@ const commenterNameCookieName = "md_commenter_name";
 const ownerCookieMaxAgeSeconds = 60 * 60 * 24 * 30;
 const commenterCookieMaxAgeSeconds = 60 * 60 * 24 * 365;
 const notes = new Map<string, NoteRecord>();
+const aiRuntime = new AiRuntimeManager(notesDir, {
+  onStateUpdated: (noteId) => broadcastAiStateUpdated(noteId),
+  onMessageDelta: (event) => broadcastAiMessageDelta(event),
+  onToolActivity: (event) => broadcastAiToolActivity(event.noteId, event.runId, event.activity),
+});
 
 const codeRenderer = new marked.Renderer();
 codeRenderer.code = ({ text, lang }: Tokens.Code) => {
@@ -386,6 +399,7 @@ app.post("/api/notes/:id/edit", requireOwnerApi, (req, res) => {
     note.title = normalizeTitle(String(req.body.title || note.title));
   }
   persistNote(note, false);
+  aiRuntime.markNoteContentChanged(noteToAiContext(note));
 
   if (titleChanged) {
     broadcastEditorHello(note);
@@ -572,6 +586,7 @@ app.delete("/api/notes/:id", requireOwnerApi, (req, res) => {
   notes.delete(id);
   try { fs.unlinkSync(noteMarkdownPath(id)); } catch {}
   try { fs.unlinkSync(noteMetaPath(id)); } catch {}
+  aiRuntime.deleteState(id);
   res.json({ ok: true });
 });
 
@@ -650,6 +665,9 @@ app.put("/api/notes/:id", requireOwnerApi, (req, res) => {
   }
   note.updatedAt = nowIso();
   persistNote(note, false);
+  if (markdownChanged) {
+    aiRuntime.markNoteContentChanged(noteToAiContext(note));
+  }
   if (shareAccessChanged) {
     enforceShareAccessForConnections(note);
   }
@@ -691,6 +709,148 @@ app.get("/api/share/:shareId/collab", (req, res) => {
     serverCounter: note.collab.serverCounter,
     collabState: saveCollabState(note.collab),
   });
+});
+
+app.get("/api/notes/:id/ai", requireOwnerApi, (req, res) => {
+  const note = notes.get(String(req.params.id));
+  if (!note) {
+    res.status(404).json({ ok: false, error: "Note not found." });
+    return;
+  }
+
+  res.json({ ok: true, ai: aiRuntime.serialize(note.id, buildAiPermissions(req, note)) });
+});
+
+app.get("/api/share/:shareId/ai", (req, res) => {
+  const note = requireShareAccess(req, res, "view");
+  if (!note) return;
+
+  res.json({ ok: true, ai: aiRuntime.serialize(note.id, buildAiPermissions(req, note)) });
+});
+
+app.post("/api/notes/:id/ai/prompt", requireOwnerApi, async (req, res) => {
+  const note = notes.get(String(req.params.id));
+  if (!note) {
+    res.status(404).json({ ok: false, error: "Note not found." });
+    return;
+  }
+
+  const permissions = buildAiPermissions(req, note);
+  const actor = buildAiActor(req);
+  if (!permissions.canPrompt || !actor) {
+    res.status(403).json({ ok: false, error: "AI prompting is not allowed." });
+    return;
+  }
+
+  try {
+    const result = await aiRuntime.enqueuePrompt(noteToAiContext(note), actor, String(req.body.prompt || ""), permissions);
+    res.json({ ok: true, runId: result.runId, ai: result.state });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "Failed to queue AI prompt." });
+  }
+});
+
+app.post("/api/share/:shareId/ai/prompt", async (req, res) => {
+  const note = requireShareAccess(req, res, "edit");
+  if (!note) return;
+
+  const permissions = buildAiPermissions(req, note);
+  const actor = buildAiActor(req);
+  if (!permissions.canPrompt || !actor) {
+    res.status(403).json({ ok: false, error: "Set your name first." });
+    return;
+  }
+
+  try {
+    const result = await aiRuntime.enqueuePrompt(noteToAiContext(note), actor, String(req.body.prompt || ""), permissions);
+    res.json({ ok: true, runId: result.runId, ai: result.state });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "Failed to queue AI prompt." });
+  }
+});
+
+app.post("/api/notes/:id/ai/cancel", requireOwnerApi, async (req, res) => {
+  const note = notes.get(String(req.params.id));
+  if (!note) {
+    res.status(404).json({ ok: false, error: "Note not found." });
+    return;
+  }
+
+  const permissions = buildAiPermissions(req, note);
+  try {
+    const ai = await aiRuntime.cancel(note.id, permissions);
+    res.json({ ok: true, ai });
+  } catch (error) {
+    res.status(409).json({ ok: false, error: error instanceof Error ? error.message : "Failed to cancel AI run." });
+  }
+});
+
+app.post("/api/share/:shareId/ai/cancel", async (req, res) => {
+  const note = requireShareAccess(req, res, "edit");
+  if (!note) return;
+
+  const permissions = buildAiPermissions(req, note);
+  if (!permissions.canCancel) {
+    res.status(403).json({ ok: false, error: "AI cancellation is not allowed." });
+    return;
+  }
+
+  try {
+    const ai = await aiRuntime.cancel(note.id, permissions);
+    res.json({ ok: true, ai });
+  } catch (error) {
+    res.status(409).json({ ok: false, error: error instanceof Error ? error.message : "Failed to cancel AI run." });
+  }
+});
+
+app.post("/api/notes/:id/ai/reset", requireOwnerApi, (req, res) => {
+  const note = notes.get(String(req.params.id));
+  if (!note) {
+    res.status(404).json({ ok: false, error: "Note not found." });
+    return;
+  }
+
+  const permissions = buildAiPermissions(req, note);
+  try {
+    const ai = aiRuntime.reset(note.id, permissions);
+    res.json({ ok: true, ai });
+  } catch (error) {
+    res.status(409).json({ ok: false, error: error instanceof Error ? error.message : "Failed to reset AI state." });
+  }
+});
+
+app.post("/api/share/:shareId/ai/reset", (req, res) => {
+  const note = requireShareAccess(req, res, "edit");
+  if (!note) return;
+
+  const permissions = buildAiPermissions(req, note);
+  if (!permissions.canReset) {
+    res.status(403).json({ ok: false, error: "AI reset is not allowed." });
+    return;
+  }
+
+  try {
+    const ai = aiRuntime.reset(note.id, permissions);
+    res.json({ ok: true, ai });
+  } catch (error) {
+    res.status(409).json({ ok: false, error: error instanceof Error ? error.message : "Failed to reset AI state." });
+  }
+});
+
+app.post("/api/notes/:id/ai/proposals/:proposalId/accept", requireOwnerApi, (req, res) => {
+  handleAiProposalAccept(req, res, false);
+});
+
+app.post("/api/share/:shareId/ai/proposals/:proposalId/accept", (req, res) => {
+  handleAiProposalAccept(req, res, true);
+});
+
+app.post("/api/notes/:id/ai/proposals/:proposalId/reject", requireOwnerApi, (req, res) => {
+  handleAiProposalReject(req, res, false);
+});
+
+app.post("/api/share/:shareId/ai/proposals/:proposalId/reject", (req, res) => {
+  handleAiProposalReject(req, res, true);
 });
 
 app.post("/api/render", requireOwnerApi, (req, res) => {
@@ -780,6 +940,7 @@ app.post("/api/share/:shareId/edit", (req, res) => {
   note.markdown = markdown;
   note.updatedAt = nowIso();
   persistNote(note, false);
+  aiRuntime.markNoteContentChanged(noteToAiContext(note));
 
   if (idListUpdates.length > 0) {
     broadcastEditorMutation(note, {
@@ -1037,6 +1198,102 @@ app.delete("/api/share/:shareId/messages/:messageId", (req, res) => {
   res.json({ ok: true, threads: serializeThreads(note, req) });
 });
 
+function resolveAiRouteNote(req: Request, res: Response, isShareRoute: boolean) {
+  if (isShareRoute) {
+    return requireShareAccess(req, res, "view");
+  }
+  const note = notes.get(String(req.params.id));
+  if (!note) {
+    res.status(404).json({ ok: false, error: "Note not found." });
+    return null;
+  }
+  return note;
+}
+
+function handleAiProposalAccept(req: Request, res: Response, isShareRoute: boolean) {
+  const note = resolveAiRouteNote(req, res, isShareRoute);
+  if (!note) {
+    return;
+  }
+
+  const permissions = buildAiPermissions(req, note);
+  const actor = buildAiActor(req);
+  if (!permissions.canManageProposals || !actor) {
+    res.status(403).json({ ok: false, error: "Proposal review is not allowed." });
+    return;
+  }
+
+  const prepared = aiRuntime.prepareProposalAcceptance(noteToAiContext(note), String(req.params.proposalId), permissions);
+  if (!prepared.ok) {
+    res.status(409).json({ ok: false, error: prepared.error, ai: prepared.state });
+    return;
+  }
+
+  let result;
+  try {
+    result = applyRangeReplacements(
+      note.collab,
+      prepared.replacements.map((replacement): RangeReplacement => ({
+        start: replacement.start,
+        end: replacement.end,
+        newText: replacement.newText,
+      })),
+    );
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "Failed to apply proposal." });
+    return;
+  }
+
+  note.collab = result.state;
+  note.markdown = result.markdown;
+  note.updatedAt = nowIso();
+  persistNote(note, false);
+
+  aiRuntime.markProposalAccepted(note.id, String(req.params.proposalId), actor, permissions, note.collab.serverCounter);
+  aiRuntime.markNoteContentChanged(noteToAiContext(note));
+
+  if (result.idListUpdates.length > 0) {
+    broadcastEditorMutation(note, {
+      type: "mutation",
+      senderId: "__ai__",
+      senderCounter: result.senderCounter,
+      serverCounter: note.collab.serverCounter,
+      markdown: note.markdown,
+      idListUpdates: result.idListUpdates,
+    });
+  } else {
+    broadcastEditorHello(note);
+  }
+  broadcastNoteUpdate(note);
+
+  res.json({
+    ok: true,
+    savedAt: note.updatedAt,
+    ai: aiRuntime.serialize(note.id, permissions),
+  });
+}
+
+function handleAiProposalReject(req: Request, res: Response, isShareRoute: boolean) {
+  const note = resolveAiRouteNote(req, res, isShareRoute);
+  if (!note) {
+    return;
+  }
+
+  const permissions = buildAiPermissions(req, note);
+  const actor = buildAiActor(req);
+  if (!permissions.canManageProposals || !actor) {
+    res.status(403).json({ ok: false, error: "Proposal review is not allowed." });
+    return;
+  }
+
+  try {
+    const ai = aiRuntime.rejectProposal(note.id, String(req.params.proposalId), actor, permissions);
+    res.json({ ok: true, ai });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "Failed to reject proposal." });
+  }
+}
+
 app.use((_req, res) => {
   res.status(404).send(renderSimplePage("Not found", `<p>Page not found.</p>`));
 });
@@ -1236,6 +1493,7 @@ function handleEditorMessage(conn: ClientConn, data: string) {
   note.markdown = result.markdown;
   note.updatedAt = nowIso();
   persistNote(note, false);
+  aiRuntime.markNoteContentChanged(noteToAiContext(note));
 
   broadcastEditorMutation(note, {
     type: "mutation",
@@ -1248,7 +1506,16 @@ function handleEditorMessage(conn: ClientConn, data: string) {
   broadcastNoteUpdate(note);
 }
 
-type AnyServerMessage = (ServerHelloMessage & { clientId?: string }) | ServerMutationMessage | ServerPresenceMessage | ServerPresenceLeaveMessage | { type: "updated"; noteId: string; shareId: string; updatedAt: string } | { type: "threads-updated"; noteId: string; shareId: string };
+type AnyServerMessage =
+  | (ServerHelloMessage & { clientId?: string })
+  | ServerMutationMessage
+  | ServerPresenceMessage
+  | ServerPresenceLeaveMessage
+  | { type: "updated"; noteId: string; shareId: string; updatedAt: string }
+  | { type: "threads-updated"; noteId: string; shareId: string }
+  | { type: "ai-state-updated"; noteId: string; shareId: string }
+  | { type: "ai-message-delta"; noteId: string; runId: string; assistantTurnId: string; delta: string; content: string }
+  | { type: "ai-tool-activity"; noteId: string; runId: string; activity: AiToolActivity };
 
 function sendServerMessage(ws: WebSocket, message: AnyServerMessage) {
   if (ws.readyState === 1) {
@@ -1333,6 +1600,60 @@ function broadcastThreadsUpdated(note: NoteRecord) {
   const message = { type: "threads-updated" as const, noteId: note.id, shareId: note.shareId };
   for (const conn of clients) {
     if (conn.noteId === note.id) {
+      sendServerMessage(conn.ws, message);
+    }
+  }
+}
+
+function broadcastAiStateUpdated(noteId: string) {
+  const note = notes.get(noteId);
+  if (!note) {
+    return;
+  }
+
+  const message = { type: "ai-state-updated" as const, noteId: note.id, shareId: note.shareId };
+  for (const conn of clients) {
+    if (isCollaborativeConn(conn, note.id)) {
+      sendServerMessage(conn.ws, message);
+    }
+  }
+}
+
+function broadcastAiMessageDelta(event: { noteId: string; runId: string; assistantTurnId: string; delta: string; content: string }) {
+  const note = notes.get(event.noteId);
+  if (!note) {
+    return;
+  }
+
+  const message = {
+    type: "ai-message-delta" as const,
+    noteId: note.id,
+    runId: event.runId,
+    assistantTurnId: event.assistantTurnId,
+    delta: event.delta,
+    content: event.content,
+  };
+  for (const conn of clients) {
+    if (isCollaborativeConn(conn, note.id)) {
+      sendServerMessage(conn.ws, message);
+    }
+  }
+}
+
+function broadcastAiToolActivity(noteId: string, runId: string, activity: AiToolActivity) {
+  const note = notes.get(noteId);
+  if (!note) {
+    return;
+  }
+
+  const message = {
+    type: "ai-tool-activity" as const,
+    noteId: note.id,
+    runId,
+    activity,
+  };
+  for (const conn of clients) {
+    if (isCollaborativeConn(conn, note.id)) {
       sendServerMessage(conn.ws, message);
     }
   }
@@ -1603,6 +1924,7 @@ function serializeThreads(note: NoteRecord, req: Request) {
 }
 
 function serializeNoteForClient(note: NoteRecord, req: Request) {
+  const aiPermissions = buildAiPermissions(req, note);
   return {
     note: {
       id: note.id,
@@ -1617,6 +1939,55 @@ function serializeNoteForClient(note: NoteRecord, req: Request) {
     },
     viewer: buildViewerInfo(req),
     threads: serializeThreads(note, req),
+    ai: aiRuntime.serialize(note.id, aiPermissions),
+  };
+}
+
+function noteToAiContext(note: NoteRecord) {
+  return {
+    id: note.id,
+    title: note.title,
+    markdown: note.markdown,
+    serverCounter: note.collab.serverCounter,
+  };
+}
+
+function buildAiActor(req: Request): AiActor | null {
+  if (isOwnerAuthenticated(req)) {
+    return { id: "__owner__", name: "Owner", kind: "owner" };
+  }
+
+  const commenter = getCommenterIdentity(req);
+  if (!commenter.id || !commenter.name) {
+    return null;
+  }
+
+  return {
+    id: commenter.id,
+    name: commenter.name,
+    kind: "editor",
+  };
+}
+
+function buildAiPermissions(req: Request, note: NoteRecord): AiPermissions {
+  if (isOwnerAuthenticated(req)) {
+    return {
+      canPrompt: true,
+      canCancel: true,
+      canReset: true,
+      canManageProposals: true,
+      canViewLive: true,
+    };
+  }
+
+  const commenter = getCommenterIdentity(req);
+  const isEditor = note.shareAccess === "edit" && Boolean(commenter.id && commenter.name);
+  return {
+    canPrompt: isEditor,
+    canCancel: isEditor,
+    canReset: isEditor,
+    canManageProposals: isEditor,
+    canViewLive: isEditor,
   };
 }
 
