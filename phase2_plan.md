@@ -2,7 +2,9 @@
 
 ## Goal
 
-Replace the modal-based AI panel with a permanent toggleable chat sidebar, and move proposal review from the AI panel into embedded inline diffs rendered directly in the markdown preview.
+Replace the modal-based AI panel with a permanent toggleable chat sidebar, and move proposal review into contextual inline diffs shown in the markdown preview.
+
+This revision incorporates the findings from `phase2_plan_review.md` and updates the implementation plan to match the current codebase more closely.
 
 ---
 
@@ -10,13 +12,14 @@ Replace the modal-based AI panel with a permanent toggleable chat sidebar, and m
 
 | Component | Location | Current behavior |
 |---|---|---|
-| AI toggle button | `public/app.js` — `aiButton` in topbar | Opens a full-screen modal (`modalBackdrop`) containing the AI panel |
-| AI panel | `public/app.js` — `renderAiPanel()` | Modal with conversation turns, live streaming, proposal cards (diff tables), and prompt form |
-| Proposal review | `public/app.js` — `renderAiProposal()` | Side-by-side old/new pre blocks inside the modal. Accept/reject buttons are modal-only |
-| AI state | `src/ai.ts` — `AiRuntimeManager` | Server-side: turns, proposals (hunks with anchors), active run, queued prompts |
-| AI API | `src/server.ts` — `/api/…/ai/*` routes | REST endpoints for prompt, cancel, reset, proposal accept/reject |
-| AI WebSocket | `src/server.ts` — broadcast functions | `ai-state-updated`, `ai-message-delta`, `ai-tool-activity` messages |
-| CSS | `public/styles.css` — `.ai-panel-*`, `.ai-proposal-*` | Modal-based layout, ~180 lines of AI-specific CSS |
+| AI toggle button | `public/app.js` — `aiButton` in topbar | Opens a full-screen modal containing the AI panel |
+| AI panel | `public/app.js` — `renderAiPanel()` | Modal with conversation turns, live streaming, proposal cards, and prompt form |
+| Proposal review | `public/app.js` — `renderAiProposal()` | Proposal cards live inside the AI panel; accept/reject is proposal-level |
+| Proposal anchor validation | `src/ai.ts` — `resolveProposalAnchor()` | Server validates proposal hunks against raw markdown |
+| Comment anchor resolution | `public/app.js` — `locateAnchor()` / `collectTextNodes()` | Client resolves comment anchors against rendered preview text nodes |
+| Layouts | `public/app.js` — `renderEditorLayout()`, `renderPublicLayout()`, `renderPublicEditorLayout()` | Owner/shared editor use `.workspace`; public view does not |
+| Responsive breakpoint | `public/styles.css` | Narrow-screen mode already switches at `980px` |
+| AI permissions | `src/server.ts` — `buildAiPermissions()` | Owners and identified shared editors can prompt/manage/live view; shared view/comment users cannot |
 
 ---
 
@@ -24,179 +27,209 @@ Replace the modal-based AI panel with a permanent toggleable chat sidebar, and m
 
 ### 1. Permanent Chat Sidebar
 
-- The chat panel is a **sidebar** (`<aside class="ai-sidebar">`) pinned to the right edge of the viewport, always rendered in the DOM.
-- A toggle button in the topbar controls visibility via a CSS class (`ai-sidebar-open`) on the app root.
+- The AI panel becomes a persistent sidebar shell that is always rendered in the DOM.
+- On desktop:
+  - owner editor and shared editor layouts mount the sidebar as a third child of `.workspace`
+  - public view/comment pages mount the sidebar as a page-level overlay attached to the app shell, because that layout does not use `.workspace`
+- The closed desktop state uses layout width, not transforms:
+  - closed: `width: 0; overflow: hidden`
+  - open: `width: 380px`
+  - transition: `width 220ms ease`
+- On screens `980px` and below, the sidebar becomes a right-side overlay and no longer consumes layout width.
 - The sidebar contains:
-  - Conversation turns (scrollable)
-  - Active run with streaming content and tool activity
-  - Prompt input at the bottom
-  - **No proposal cards** — proposals are shown inline in the preview
-- The sidebar has a fixed width (e.g. 380px) and slides in/out with a CSS transition.
-- The editor/preview area shrinks to accommodate the open sidebar (flex or grid adjustment).
-- Keyboard shortcut: `Cmd+Shift+I` (Mac) / `Ctrl+Shift+I` (others) toggles the sidebar. This mirrors VS Code's Copilot Chat toggle, making it familiar for users. The shortcut is registered as a `keydown` listener on `document` and calls the same toggle logic as the topbar button.
+  - conversation turns
+  - live run / streaming state when the viewer has permission
+  - prompt composer when the viewer has permission
+  - no embedded proposal cards
+- Shortcut: `Cmd+Shift+L` on macOS / `Ctrl+Shift+L` elsewhere.
+- The shortcut must not fire while focus is inside `input`, `textarea`, or `[contenteditable]`, or while IME composition is active.
 
-### 2. Embedded Inline Diffs in Preview
+### 2. Inline Diff Architecture
 
-- When the AI creates a proposal, its hunks are rendered as **inline diff blocks** in the markdown preview pane, overlaid at the correct position.
-- Each diff block shows:
-  - Struck-through original text (red/deletion styling)
-  - Proposed replacement text below (green/addition styling)
-  - A summary label and action buttons (Accept / Reject / Revise) embedded in the block
-- Diff blocks are positioned by matching the `anchor` data (quote, prefix, suffix, start, end) to DOM text nodes in the rendered preview — similar to how comment highlights are positioned today.
-- Multiple open proposals can be visible simultaneously, each with a distinct visual treatment (e.g. numbered or color-coded).
-- When a proposal is accepted or rejected, the diff block is removed and the preview re-renders.
-- Stale proposals show a warning indicator instead of the diff.
+- Proposals are reviewed in context inside the preview, but the mounting model is overlay-based rather than DOM-insertion-based.
+- The preview gets two distinct layers:
+  - `#anchorTextRoot`: rendered markdown content used for text mapping, comment anchors, and selection logic
+  - `#proposalLayer`: separate overlay layer for AI proposal UI
+- Proposal anchoring remains server-authoritative:
+  - proposal validity is still decided by `resolveProposalAnchor()` against raw markdown
+  - the server also returns per-hunk display metadata for preview rendering
+  - the client only maps server-provided rendered-text offsets into DOM ranges
+- The reusable part of the current comment system is `collectTextNodes()` plus offset-to-range mapping. The client does not re-run proposal matching logic against rendered HTML.
+
+### 3. Proposal Review Semantics
+
+- Proposal actions remain proposal-level, matching the existing API.
+- A multi-hunk proposal can render as multiple preview blocks, but all blocks share the same proposal ID and act as one review unit.
+- Triggering Accept / Reject / Revise from any block applies to the whole proposal.
+- Open proposals show review controls where permitted.
+- Stale proposals:
+  - do not show Accept
+  - keep Reject as the cleanup action
+  - may offer Revise when the viewer can prompt
+- Ambiguous or not-inline-renderable proposals show a non-accepting fallback state rather than allowing the client to guess placement.
+
+### 4. Permissions Matrix
+
+| Capability | Owner | Shared editor with commenter identity | Shared view/comment user |
+|---|---|---|---|
+| Open sidebar and read past turns | ✅ | ✅ | ✅ |
+| See inline diff blocks | ✅ | ✅ | ✅ |
+| See live streaming state | ✅ | ✅ | ❌ |
+| Send prompts | ✅ | ✅ | ❌ |
+| Reset conversation | ✅ | ✅ | ❌ |
+| Accept/reject proposals | ✅ | ✅ | ❌ |
+| Revise via AI prompt | ✅ | ✅ | ❌ |
+
+Read-only users can see pending AI proposals in context, but they do not get prompt or proposal action controls.
 
 ---
 
 ## Implementation Steps
 
-### Step 1 — Restructure layout to support sidebar
-
-**Files:** `public/styles.css`, `public/app.js` (layout templates)
-
-1. Change `.workspace` from `grid-template-columns: 1fr 1fr` to a flex layout (or add a third column) that can accommodate the sidebar:
-   ```
-   .app-root {
-     display: flex;
-     flex-direction: column;
-     height: 100vh;
-   }
-   .workspace {
-     display: flex;
-     flex: 1;
-     overflow: hidden;
-   }
-   .editor-pane { flex: 1; min-width: 0; }
-   .preview-stage { flex: 1; min-width: 0; }
-   .ai-sidebar { width: 380px; flex-shrink: 0; ... }
-   ```
-2. Add `.ai-sidebar` styles:
-   - Fixed width, full height below topbar, border-left, flex column layout
-   - Hidden by default (`transform: translateX(100%)` or `display: none`)
-   - `.ai-sidebar-open .ai-sidebar` reveals it
-3. Add a smooth CSS transition for the sidebar toggle.
-4. Adjust mobile responsive rules: on narrow screens, sidebar overlays instead of pushing content.
-
-### Step 2 — Move AI panel from modal to sidebar
-
-**Files:** `public/app.js`, `public/styles.css`
-
-1. Remove the `renderAiPanel()` function that populates `modalBackdrop`.
-2. Add a new `renderAiSidebar()` function that renders into a dedicated `#aiSidebar` element that is part of the layout HTML (not the modal).
-3. Update all three layout templates (`renderEditorLayout`, `renderPublicLayout`, `renderPublicEditorLayout`) to include `<aside class="ai-sidebar" id="aiSidebar">` inside the workspace area.
-4. Change `openAiPanel()` to toggle the sidebar:
-   - Add/remove `.ai-sidebar-open` on the app root
-   - Call `renderAiSidebar()` to populate content
-5. Remove the modal-based AI rendering from `closeModal()` — the AI sidebar has its own close button.
-6. Remove all `.ai-panel-modal` CSS rules. Add `.ai-sidebar` rules.
-7. Keep `state.aiPanelOpen` (rename to `state.aiSidebarOpen`) for tracking toggle state.
-8. Register a global `keydown` listener for `Cmd+Shift+I` / `Ctrl+Shift+I` that toggles `state.aiSidebarOpen` and calls the same toggle logic as the topbar button. Prevent default to avoid opening browser DevTools in some browsers (note: Chrome uses `Cmd+Option+I` for DevTools, so `Cmd+Shift+I` is safe; Firefox uses `Cmd+Shift+I` for DevTools — consider `Cmd+Shift+J` as an alternative, or accept the minor Firefox conflict and document it).
-
-### Step 3 — Add sidebar content rendering
-
-**Files:** `public/app.js`, `public/styles.css`
-
-1. Extract conversation rendering from the old `renderAiPanel()` into `renderAiSidebar()`:
-   - Header: "Jot AI" title, close button, refresh, reset
-   - Scrollable conversation area with `renderAiTurn()` (reuse existing, stripped of proposal cards)
-   - Active run / streaming section
-   - Footer: prompt textarea + send/cancel buttons
-2. Each turn shows author, timestamp, content. Assistant turns show tool activity.
-3. **Remove proposal rendering from turns** — turns no longer embed proposal diffs. Instead, show a brief note like _" Proposed 2 changes — see inline diff in preview"_.
-4. Add CSS for the sidebar layout (flex column, conversation scrolling, sticky footer).
-
-### Step 4 — Render inline diff blocks in preview
-
-**Files:** `public/app.js`, `public/styles.css`
-
-This is the core new feature.
-
-1. **Data model in frontend state:**
-   - `state.ai.proposals` already contains proposals with `hunks[].anchor` (quote, prefix, suffix, start, end).
-   - No changes needed to the data model.
-
-2. **Anchoring approach — reuse comment highlight pattern:**
-   - The existing comment system already positions overlays on the preview using text range matching. Follow the same approach.
-   - Add a new `renderProposalDiffs()` function called after every preview render and AI state update.
-   - For each open proposal, for each hunk:
-     - Search the rendered preview DOM (`#previewContent`) for the text matching `hunk.anchor.quote`.
-     - Validate with prefix/suffix context (same scoring as server-side `resolveProposalAnchor`).
-     - Find the character range in the DOM text nodes.
-     - Insert a diff block element at that position.
-
-3. **Diff block HTML structure:**
-   ```html
-   <div class="ai-diff-block" data-proposal-id="..." data-hunk-id="...">
-     <div class="ai-diff-header">
-       <span class="ai-diff-label">AI proposal: Fix intro wording</span>
-       <span class="ai-diff-badge">open</span>
-     </div>
-     <div class="ai-diff-content">
-       <div class="ai-diff-deleted">
-         <div class="ai-diff-section-label">Original</div>
-         <div class="ai-diff-text">...</div>
-       </div>
-       <div class="ai-diff-added">
-         <div class="ai-diff-section-label">Proposed</div>
-         <div class="ai-diff-text">...</div>
-       </div>
-     </div>
-     <div class="ai-diff-actions">
-       <button data-ai-accept="...">Accept</button>
-       <button data-ai-reject="...">Reject</button>
-       <button data-ai-revise="...">Revise</button>
-     </div>
-   </div>
-   ```
-
-4. **DOM insertion strategy:**
-   - Option A (recommended): Wrap the matched text range in a `<span class="ai-diff-anchor">`, then insert the diff block as the next sibling of the anchor's parent block element (e.g. after the `<p>` or `<li>` that contains the match). This avoids breaking markdown structure.
-   - Option B: Use the `highlight-layer` overlay (absolute positioned, pointer-events) similar to comment highlights, with the diff block rendered as an overlay. This is cleaner for the DOM but harder to make interactive (accept/reject buttons need pointer events).
-
-   **Recommendation: Option A** — it's simpler, the diff blocks are real DOM elements in the preview flow, and buttons are naturally interactive.
-
-5. **Stale proposals:** Instead of a diff block, render a small inline badge near the target text: _"Proposal stale: target text changed"_. No accept/reject buttons, only dismiss.
-
-6. **Multiple proposals:** If multiple proposals target overlapping or nearby text, stack their diff blocks vertically at the insertion point, each with a clear label and distinct left-border color.
-
-### Step 5 — Wire up diff block actions
-
-**Files:** `public/app.js`
-
-1. After rendering diff blocks, attach event listeners to `[data-ai-accept]`, `[data-ai-reject]`, `[data-ai-revise]` buttons (same API calls as current modal-based accept/reject).
-2. On accept: API call succeeds → `state.ai` is updated → preview re-renders → diff blocks re-render (accepted proposal gone).
-3. On reject: Same flow, rejected proposal disappears from inline view.
-4. On revise: Populate the sidebar prompt input with a revision request, focus the sidebar.
-5. Use event delegation on `#previewContent` to avoid re-attaching listeners on every render.
-
-### Step 6 — Update server-side proposal prompt
+### Step 1 — Add a server-authoritative proposal display contract
 
 **Files:** `src/ai.ts`
 
-1. Update `buildSystemInstructions()` and `buildPrompt()`:
-   - Change the instruction from "Tell collaborators to review it in the AI panel" to something like "Proposals appear as inline diffs in the document preview. Collaborators review them in context."
-2. No structural changes to the proposal tool, state model, or API — the backend stays the same.
+1. Keep `resolveProposalAnchor()` as the source of truth for markdown-level proposal validity.
+2. Extend AI serialization so each proposal hunk includes display metadata for preview rendering, for example:
+   - `display.state`: `resolved | stale | ambiguous | not-inline-renderable`
+   - `display.renderedStart` / `display.renderedEnd` when safely resolvable
+   - `display.reason` for stale or fallback cases
+3. Recompute proposal display metadata whenever note content changes in `markNoteContentChanged()`, not only at accept time.
+4. Keep ambiguity handling server-side. Do not reproduce the `resolveProposalAnchor()` scoring model in the browser.
+5. If a proposal cannot be mapped safely into rendered preview text, return explicit fallback state instead of asking the client to infer placement.
 
-### Step 7 — Clean up removed code
+### Step 2 — Split layout work by page mode
 
 **Files:** `public/app.js`, `public/styles.css`
 
-1. Remove `renderAiProposal()` function (proposal cards no longer rendered in sidebar/modal).
-2. Remove all `.ai-panel-modal`, `.ai-proposal-*` (modal variant) CSS.
-3. Remove `renderAiPanel()` function entirely.
-4. Remove the modal-based AI event wiring (backdrop click, etc.).
-5. Remove the `.ai-toggle` button styles that show proposal counts — the toggle becomes a simple sidebar toggle (could use a chat icon instead of text).
-6. Remove the `modalBackdrop` usage from AI code paths (keep it for agent settings modal and other modals).
+1. Update the plan and implementation to treat layouts separately:
+   - owner editor: `.workspace` becomes editor + preview + AI sidebar
+   - shared editor: same as owner editor
+   - public view/comment page: sidebar mounts outside `.workspace` as an app-shell overlay
+2. Convert `.workspace` from a two-column grid to a flex layout for editor-capable pages.
+3. Keep public view layout structurally separate instead of pretending all three templates share the same container model.
 
-### Step 8 — Responsive / mobile behavior
+### Step 3 — Migrate from modal AI panel to sidebar incrementally
 
-**Files:** `public/styles.css`, `public/app.js`
+**Files:** `public/app.js`, `public/styles.css`
 
-1. On screens < 768px:
-   - Sidebar becomes a full-width overlay (slides from right, covers preview/editor).
-   - Inline diffs remain in preview as normal (they're in the DOM flow).
-2. Toggle button always visible in topbar.
+1. First extract reusable turn/composer/live-run rendering helpers from `renderAiPanel()` without deleting the modal path yet.
+2. Build `renderAiSidebar()` on top of those shared pieces.
+3. Add dedicated sidebar containers to the relevant layouts.
+4. Rename `state.aiPanelOpen` to `state.aiSidebarOpen`.
+5. Switch the topbar AI button and keyboard shortcut to toggle the sidebar.
+6. Desktop open/closed behavior:
+   - open: sidebar width participates in layout
+   - closed: width collapses to `0`
+7. Mobile/narrow behavior at `980px` and below:
+   - sidebar becomes a full-height right-side overlay
+   - it no longer consumes workspace width
+8. After the sidebar path is working, remove modal-only AI wiring and CSS.
+
+### Step 4 — Introduce a dedicated preview text root and proposal layer
+
+**Files:** `public/app.js`, `public/styles.css`
+
+1. Refactor preview markup so rendered markdown lives in a dedicated text root, for example:
+   ```html
+   <div class="preview-canvas" id="previewCanvas">
+     <div class="preview-content markdown-body" id="anchorTextRoot"></div>
+     <div class="highlight-layer" id="highlightLayer"></div>
+     <div class="proposal-layer" id="proposalLayer"></div>
+     ...
+   </div>
+   ```
+2. Update `setPreviewHtml()` and related preview references to target `#anchorTextRoot` instead of treating the whole preview subtree as anchorable text.
+3. Scope `collectTextNodes()`, `locateAnchor()`, selection comments, and related mapping logic to the text root only.
+4. Configure proposal layer interaction:
+   - layer default: `pointer-events: none`
+   - actionable proposal controls: `pointer-events: auto`
+5. Guard preview click handling so interactions inside the proposal layer do not fall through into thread-rail or comment-selection behavior.
+
+### Step 5 — Render proposals from server-provided display ranges
+
+**Files:** `public/app.js`, `public/styles.css`
+
+1. Add `renderProposalDiffs()` as a post-render pass for preview updates and AI state updates.
+2. For each proposal hunk:
+   - if `display.state === "resolved"`, map `renderedStart` / `renderedEnd` through `collectTextNodes()` into a DOM range
+   - derive an anchor rect or block rect from that range
+   - mount a proposal card in `#proposalLayer` positioned beside the target content
+3. Proposal cards show:
+   - proposal summary
+   - shared grouping cues for multi-hunk proposals, for example `Part 1 of 3`
+   - original text
+   - proposed text
+   - status badge
+4. Fallback states:
+   - `stale`: warning plus Reject, and Revise if permitted
+   - `ambiguous` / `not-inline-renderable`: warning card without Accept, anchored to a safe fallback location in the preview shell
+5. Multiple proposals can appear simultaneously. Overlapping cards should stack cleanly and remain distinguishable by shared accent color or ID cue.
+
+### Step 6 — Define render lifecycle and async safety explicitly
+
+**Files:** `public/app.js`
+
+1. Formalize the preview render pipeline:
+   1. replace preview HTML
+   2. await Mermaid or other layout-affecting post-processing
+   3. rebuild comment highlights / thread rail
+   4. clear and rebuild proposal overlay UI
+   5. restore any necessary scroll or focus state
+2. Run the same pipeline after:
+   - markdown preview refresh
+   - AI state updates
+   - proposal accept/reject responses
+3. Add a render-generation token so stale async work cannot mount obsolete proposal overlays after a newer render has already completed.
+
+### Step 7 — Wire proposal actions with proposal-level semantics
+
+**Files:** `public/app.js`
+
+1. Keep Accept / Reject / Revise wired to the existing proposal-level APIs.
+2. Use event delegation on `#proposalLayer`.
+3. When any proposal block is accepted or rejected, remove or update all blocks for that proposal together.
+4. Revise behavior:
+   - opens the sidebar if needed
+   - seeds the prompt composer with a refresh request for the whole proposal
+5. Read-only users see proposal state but no action controls.
+
+### Step 8 — Update AI instructions and success copy
+
+**Files:** `src/ai.ts`
+
+1. Update the proposal tool success result at the existing concrete string location:
+   - change `Created proposal ${proposalId}. Tell collaborators to review it in the AI panel.`
+   - to inline-diff wording that points collaborators to the preview
+2. Update `buildSystemInstructions()` so the model explains that proposals are reviewed as inline diffs in the preview.
+3. Update `buildPrompt()` so assistant responses refer to inline preview review rather than the AI panel.
+
+### Step 9 — Remove modal-only AI code after the sidebar path is stable
+
+**Files:** `public/app.js`, `public/styles.css`
+
+1. Remove `renderAiProposal()` from the sidebar path.
+2. Remove proposal-card rendering from conversation turns.
+3. Remove `renderAiPanel()` and modal-only AI event wiring.
+4. Remove obsolete `.ai-panel-*` / `.ai-proposal-*` modal styles and replace them with `.ai-sidebar-*` and `.proposal-layer-*` rules.
+5. Keep `modalBackdrop` only for unrelated modal flows that still need it.
+
+### Step 10 — Run a manual validation pass before calling the refactor complete
+
+**Files:** none; validation step
+
+1. Verify owner editor with sidebar open and closed.
+2. Verify shared editor with identity, including prompt, streaming, accept/reject, and revise.
+3. Verify shared view/comment flow with read-only proposal visibility and no management controls.
+4. Verify public view/comment layout, including sidebar mounting strategy and permission gating.
+5. Verify open, accepted, rejected, stale, ambiguous, and not-inline-renderable proposal states.
+6. Verify multi-hunk accept removes every block for the proposal.
+7. Verify overlapping proposals do not break layout or comments.
+8. Verify comment anchors, selection comments, and thread interactions still work alongside proposal overlays.
+9. Verify narrow-screen behavior below `980px`.
+10. Verify the keyboard shortcut both inside and outside editable fields.
+11. Verify streaming can continue in the sidebar while proposal diffs are visible.
 
 ---
 
@@ -204,37 +237,35 @@ This is the core new feature.
 
 | File | Change |
 |---|---|
-| `public/app.js` | Replace modal AI panel with sidebar. Add inline diff rendering in preview. Remove `renderAiPanel`, `renderAiProposal`. Add `renderAiSidebar`, `renderProposalDiffs`. Update layout templates. |
-| `public/styles.css` | Remove `.ai-panel-modal` CSS. Add `.ai-sidebar` layout. Add `.ai-diff-*` inline diff styles. Update `.workspace` to flex layout. Add responsive rules. |
-| `src/ai.ts` | Minor: update system prompt wording for inline diffs. |
-| `src/server.ts` | No changes. |
-| `src/collab.ts` | No changes. |
+| `public/app.js` | Add sidebar rendering, split preview text root from proposal overlay layer, render inline proposal overlays, update layout templates by page mode, remove modal AI path |
+| `public/styles.css` | Convert workspace/editor layouts for sidebar support, add sidebar styles, add proposal overlay styles, align narrow-screen behavior with existing `980px` breakpoint |
+| `src/ai.ts` | Add server-authoritative proposal display metadata, revalidate on note changes, update proposal review copy and prompt instructions |
+| `src/server.ts` | No API shape change expected unless AI serialization helpers need small wiring adjustments |
 
 ---
 
-## Risk & Open Questions
+## Risks & Open Questions
 
-1. **DOM anchoring reliability:** Matching proposal anchor text to rendered HTML is inherently fragile (markdown → HTML transformation may change whitespace, entity encoding, etc.). The existing comment system handles this with prefix/suffix scoring — we'll reuse that pattern. Fallback: if anchor resolution fails, show the diff block at the top of the preview with a "could not locate in document" note.
-
-2. **Preview re-render timing:** Every keystroke triggers a debounced preview re-render (`scheduleRender`). Diff blocks must be re-inserted after each render. This is the same constraint as comment highlights. Performance should be fine since we're only processing a small number of open proposals.
-
-3. **Contenteditable interaction:** If the user is editing in the textarea (source view), diff blocks are only visible in the preview pane. This is acceptable — the preview is the rendered view where contextual diffs make sense.
-
-4. **Diff block positioning inside lists/tables:** Nested structures may make DOM insertion awkward. The fallback is to render the diff block after the nearest block-level ancestor.
+1. **Rendered-text coordinate generation on the server:** this is the main technical risk. The plan now assumes the server can derive preview-text offsets aligned with the rendered markdown output, rather than leaving that guesswork to the client.
+2. **Overlay positioning around dense content:** lists, tables, callouts, and narrow screens may need proposal-card collision handling or fallback positioning rules.
+3. **Preview re-render churn:** proposal overlays must survive frequent preview refreshes without flicker or stale async mounts; the generation-token requirement is meant to address this.
+4. **Public-page product scope:** the plan assumes public view/comment users can open the sidebar to read prior AI output while remaining unable to prompt, manage, or view live runs. If that product choice changes, the layout and permission plan should be updated before implementation.
 
 ---
 
 ## Estimated Effort
 
-| Step | Scope |
+| Workstream | Scope |
 |---|---|
-| Step 1: Layout restructure | Small — CSS + minor template changes |
-| Step 2: Modal → sidebar | Medium — rewrite rendering, wire events |
-| Step 3: Sidebar content | Small — extract from existing code |
-| Step 4: Inline diffs | **Large** — new feature, DOM anchoring, rendering |
-| Step 5: Wire actions | Small — reuse existing API calls |
-| Step 6: Update prompts | Trivial — text changes |
-| Step 7: Cleanup | Small — delete dead code |
-| Step 8: Responsive | Small — CSS media queries |
+| Sidebar + layout migration across page modes | Medium-Large |
+| Proposal overlay architecture + rendering | Large |
+| Proposal action wiring + permission-aware UI | Medium |
+| AI copy updates + cleanup | Small-Medium |
+| Manual validation / regression pass | Medium |
 
-**Total: ~2–3 focused sessions.** Step 4 is the bulk of the new work.
+**Total: ~4–6 focused sessions.**
+
+If we want to reduce integration risk, split implementation into two PRs:
+
+1. Sidebar migration and modal AI removal
+2. Inline proposal overlays in preview
