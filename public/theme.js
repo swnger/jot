@@ -21,7 +21,7 @@
     }
     if (window.__mermaid) {
       window.__mermaid.initialize({ startOnLoad: false, theme: next === "light" ? "default" : "dark" });
-      var container = document.getElementById("previewContent");
+      var container = document.getElementById("anchorTextRoot") || document.getElementById("previewContent");
       if (container) {
         container.querySelectorAll(".mermaid-wrap").forEach(function(wrap) {
           var pre = wrap.querySelector("pre.mermaid");

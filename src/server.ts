@@ -2558,7 +2558,7 @@ function renderAppShell(
       import mermaid from "/static/mermaid/mermaid.esm.min.mjs";
       mermaid.initialize({ startOnLoad: false, theme: document.documentElement.getAttribute("data-theme") === "light" ? "default" : "dark" });
       window.__mermaid = mermaid;
-      if (window.__renderMermaid) { var c = document.getElementById("previewContent"); if (c) window.__renderMermaid(c); }
+      if (window.__renderMermaid) { var c = document.getElementById("anchorTextRoot") || document.getElementById("previewContent"); if (c) window.__renderMermaid(c); }
     </script>`
         : ""
     }

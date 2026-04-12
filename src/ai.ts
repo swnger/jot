@@ -638,9 +638,13 @@ export class AiRuntimeManager {
       let becameStale = false;
       for (const hunk of proposal.hunks) {
         const newDisplay = computeHunkDisplay(note.markdown, hunk);
-        const prevState = hunk.display?.state;
-        const prevStart = hunk.display?.renderedStart;
-        if (prevState !== newDisplay.state || prevStart !== newDisplay.renderedStart) {
+        const prevDisplay = hunk.display;
+        if (
+          prevDisplay?.state !== newDisplay.state
+          || prevDisplay?.renderedStart !== newDisplay.renderedStart
+          || prevDisplay?.renderedEnd !== newDisplay.renderedEnd
+          || prevDisplay?.reason !== newDisplay.reason
+        ) {
           hunk.display = newDisplay;
           changed = true;
         }
