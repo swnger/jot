@@ -41,11 +41,19 @@ export type AiTurn = {
   inReplyToTurnId?: string;
 };
 
+export type ProposalHunkDisplay = {
+  state: "resolved" | "stale" | "ambiguous" | "not-inline-renderable";
+  reason?: string;
+  renderedStart?: number;
+  renderedEnd?: number;
+};
+
 export type AiProposalHunk = {
   id: string;
   oldText: string;
   newText: string;
   anchor: ProposalAnchor;
+  display?: ProposalHunkDisplay;
 };
 
 export type AiProposal = {
@@ -326,6 +334,7 @@ function buildPrompt(note: AiNoteContext, turns: AiTurn[], proposals: AiProposal
     `If you want to suggest note edits, call ${PROPOSAL_TOOL_NAME} once with a concise summary and one or more replacement hunks.`,
     "Each hunk.oldText must be copied exactly from the current note markdown and must be specific enough to be unique.",
     "Do not output raw JSON in chat unless the collaborator explicitly asks for it.",
+    "Proposals are shown as inline diffs in the preview pane; collaborators accept or reject them there.",
   ].join("\n\n");
 }
 
@@ -336,7 +345,7 @@ function buildSystemInstructions() {
     "Do not rely on filesystem, shell, git, web, or network tools.",
     "Use the submit_note_proposal tool for meaningful note changes so humans can review them before they touch the document.",
     "For pure insertions, wrap the insertion as a replacement of a nearby existing block so oldText remains non-empty.",
-    "After a successful proposal tool call, briefly explain what you changed and how collaborators can review it.",
+    "After a successful proposal tool call, briefly explain what you changed. Collaborators review proposals as inline diffs directly in the preview pane, not in the chat.",
   ].join("\n");
 }
 
@@ -413,6 +422,19 @@ function resolveProposalAnchor(markdown: string, hunk: AiProposalHunk) {
     ok: true as const,
     start: best.candidate,
     end: best.candidate + hunk.oldText.length,
+  };
+}
+
+function computeHunkDisplay(markdown: string, hunk: AiProposalHunk): ProposalHunkDisplay {
+  const result = resolveProposalAnchor(markdown, hunk);
+  if (!result.ok) {
+    const resolveState = result.reason.toLowerCase().includes("ambiguous") ? "ambiguous" : "stale";
+    return { state: resolveState, reason: result.reason };
+  }
+  return {
+    state: "resolved",
+    renderedStart: result.start,
+    renderedEnd: result.end,
   };
 }
 
@@ -613,15 +635,25 @@ export class AiRuntimeManager {
       if (proposal.status !== "open") {
         continue;
       }
+      let becameStale = false;
       for (const hunk of proposal.hunks) {
-        const resolved = resolveProposalAnchor(note.markdown, hunk);
-        if (!resolved.ok) {
-          proposal.status = "stale";
-          proposal.staleReason = resolved.reason;
-          proposal.updatedAt = nowIso();
+        const newDisplay = computeHunkDisplay(note.markdown, hunk);
+        const prevState = hunk.display?.state;
+        const prevStart = hunk.display?.renderedStart;
+        if (prevState !== newDisplay.state || prevStart !== newDisplay.renderedStart) {
+          hunk.display = newDisplay;
           changed = true;
-          break;
         }
+        if (newDisplay.state !== "resolved") {
+          becameStale = true;
+        }
+      }
+      if (becameStale) {
+        proposal.status = "stale";
+        const firstBadHunk = proposal.hunks.find((h) => h.display?.state !== "resolved");
+        proposal.staleReason = firstBadHunk?.display?.reason ?? "The proposal target has changed.";
+        proposal.updatedAt = nowIso();
+        changed = true;
       }
     }
 
@@ -794,12 +826,14 @@ export class AiRuntimeManager {
                 if (!anchor) {
                   return buildFailureResult("Each proposal hunk oldText must match a unique span in the current note.");
                 }
-                hunks.push({
+                const hunk: AiProposalHunk = {
                   id: createId(10),
                   oldText: rawHunk.oldText,
                   newText: rawHunk.newText,
                   anchor,
-                });
+                };
+                hunk.display = computeHunkDisplay(note.markdown, hunk);
+                hunks.push(hunk);
               }
 
               const proposalId = createId(12);
@@ -825,7 +859,7 @@ export class AiRuntimeManager {
               this.persistState(liveState);
               this.callbacks.onStateUpdated(note.id);
 
-              return buildSuccessResult(`Created proposal ${proposalId}. Tell collaborators to review it in the AI panel.`);
+              return buildSuccessResult(`Created proposal ${proposalId}. Collaborators can review it as an inline diff in the preview.`);
             },
           }),
         ],

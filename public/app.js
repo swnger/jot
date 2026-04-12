@@ -110,9 +110,10 @@
     showResolved: false,
     showComments: true,
     modalOpen: false,
-    aiPanelOpen: false,
+    aiSidebarOpen: false,
     ai: null,
     aiDraft: "",
+    renderGeneration: 0,
   };
 
   if (page === "list") {
@@ -318,9 +319,10 @@
 
     const previewScroll = document.getElementById("previewScroll");
     const previewCanvas = document.getElementById("previewCanvas");
-    const previewContent = document.getElementById("previewContent");
+    const previewContent = document.getElementById("anchorTextRoot");
     const threadRail = document.getElementById("threadRail");
     const highlightLayer = document.getElementById("highlightLayer");
+    const proposalLayer = document.getElementById("proposalLayer");
     const selectionBubble = document.getElementById("selectionBubble");
     const modalBackdrop = document.getElementById("modalBackdrop");
     const topbarTitle = document.getElementById("topbarTitle");
@@ -333,6 +335,7 @@
     const commentsButton = document.getElementById("commentsButton");
     const logoutButton = document.getElementById("logoutButton");
     const aiButton = document.getElementById("aiButton");
+    const aiSidebar = document.getElementById("aiSidebar");
     const saveStatus = document.getElementById("saveStatus");
     const commenterLabel = document.getElementById("commenterLabel");
     const commentFab = document.getElementById("commentFab");
@@ -345,6 +348,7 @@
       previewContent,
       threadRail,
       highlightLayer,
+      proposalLayer,
       selectionBubble,
       modalBackdrop,
       topbarTitle,
@@ -357,6 +361,7 @@
       commentsButton,
       logoutButton,
       aiButton,
+      aiSidebar,
       saveStatus,
       commenterLabel,
       commentFab,
@@ -385,8 +390,24 @@
     }
 
     if (aiButton) {
-      aiButton.addEventListener("click", () => openAiPanel(refs, isPublic));
+      aiButton.addEventListener("click", () => toggleAiSidebar(refs, isPublic));
     }
+
+    // Keyboard shortcut: Cmd+Shift+L (macOS) / Ctrl+Shift+L (other)
+    document.addEventListener("keydown", (e) => {
+      if (e.isComposing) return;
+      const active = document.activeElement;
+      if (active) {
+        const tag = active.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        if (active.isContentEditable) return;
+      }
+      const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+      if ((isMac ? e.metaKey : e.ctrlKey) && e.shiftKey && e.key === "L") {
+        e.preventDefault();
+        toggleAiSidebar(refs, isPublic);
+      }
+    });
 
     const agentButton = document.getElementById("agentButton");
     if (agentButton) {
@@ -557,6 +578,9 @@
       if (event.target.closest(".thread-rail") || event.target.closest(".selection-bubble")) {
         return;
       }
+      if (event.target.closest(".proposal-layer")) {
+        return;
+      }
       const threadId = findAnchorAtPoint(event.clientX, event.clientY, highlightLayer);
       if (!threadId) {
         return;
@@ -568,6 +592,49 @@
         openThreadDialog(threadId, refs, isPublic);
       }
     });
+
+    // Proposal layer: delegated event handler for accept/reject/revise
+    if (proposalLayer) {
+      proposalLayer.addEventListener("click", async (e) => {
+        const acceptBtn = e.target.closest("[data-ai-accept]");
+        if (acceptBtn) {
+          e.stopPropagation();
+          const proposalId = acceptBtn.getAttribute("data-ai-accept");
+          try {
+            const payload = await api(`${aiBasePath(isPublic)}/proposals/${proposalId}/accept`, { method: "POST" });
+            state.ai = payload.ai;
+            syncAiUi(refs, isPublic);
+          } catch (err) { alert(err.message || "Failed to accept the proposal."); }
+          return;
+        }
+        const rejectBtn = e.target.closest("[data-ai-reject]");
+        if (rejectBtn) {
+          e.stopPropagation();
+          const proposalId = rejectBtn.getAttribute("data-ai-reject");
+          try {
+            const payload = await api(`${aiBasePath(isPublic)}/proposals/${proposalId}/reject`, { method: "POST" });
+            state.ai = payload.ai;
+            syncAiUi(refs, isPublic);
+          } catch (err) { alert(err.message || "Failed to reject the proposal."); }
+          return;
+        }
+        const reviseBtn = e.target.closest("[data-ai-revise]");
+        if (reviseBtn) {
+          e.stopPropagation();
+          const proposalId = reviseBtn.getAttribute("data-ai-revise");
+          const proposal = state.ai?.proposals.find((p) => p.id === proposalId);
+          if (proposal) {
+            state.aiDraft = `Refresh the proposal "${proposal.summary}" against the current note and create a new reviewable proposal.`;
+            if (!state.aiSidebarOpen) {
+              toggleAiSidebar(refs, isPublic);
+            } else {
+              renderAiSidebar(refs, isPublic);
+            }
+          }
+          return;
+        }
+      });
+    }
 
     if (commentFab) {
       commentFab.addEventListener("click", () => {
@@ -723,10 +790,9 @@
         refsArg.commenterLabel.textContent = payload.viewer.commenterName || "anonymous";
       }
       renderAiButton(refsArg);
-      if (state.aiPanelOpen) {
-        renderAiPanel(refsArg, publicMode);
-      }
+      syncAiUi(refsArg, publicMode);
       syncThreadLayout(refsArg);
+      renderProposalDiffs(refsArg, publicMode);
     }
 
     let lastThreadsUpdate = 0;
@@ -746,9 +812,7 @@
           refs.commenterLabel.textContent = payload.viewer.commenterName ? payload.viewer.commenterName : "anonymous";
         }
         renderAiButton(refs);
-        if (state.aiPanelOpen) {
-          renderAiPanel(refs, publicMode);
-        }
+        syncAiUi(refs, publicMode);
         syncThreadLayout(refs);
         refreshOpenThreadDialog(refs, publicMode);
       } catch (e) {
@@ -782,6 +846,7 @@
       updateResolvedButton(refsArg.resolvedButton);
       updateCommentsButton(refsArg.commentsButton);
       syncThreadLayout(refsArg);
+      renderProposalDiffs(refsArg, publicMode);
     }
 
     function scheduleRender(refsArg) {
@@ -792,8 +857,13 @@
           method: "POST",
           body: { markdown: state.note?.markdown || "" },
         });
-        setPreviewHtml(refsArg, payload.html);
+        const gen = ++state.renderGeneration;
+        if (!refsArg.previewContent) return;
+        refsArg.previewContent.innerHTML = payload.html;
+        await renderMermaid(refsArg.previewContent);
+        if (state.renderGeneration !== gen) return;
         syncThreadLayout(refsArg);
+        renderProposalDiffs(refsArg, isPublic);
       }, 150);
     }
   }
@@ -831,14 +901,16 @@
             </div>
             <div class="preview-scroll" id="previewScroll">
               <div class="preview-canvas" id="previewCanvas">
-                <div class="preview-content markdown-body" id="previewContent"></div>
+                <div class="preview-content markdown-body" id="anchorTextRoot"></div>
                 <div class="highlight-layer" id="highlightLayer"></div>
+                <div class="proposal-layer" id="proposalLayer"></div>
                 <button type="button" class="selection-bubble hidden" id="selectionBubble">+ Comment</button>
                 <button type="button" class="comment-fab" id="commentFab">+ Comment</button>
                 <aside class="thread-rail" id="threadRail"></aside>
               </div>
             </div>
           </section>
+          <aside class="ai-sidebar" id="aiSidebar"></aside>
         </main>
         <div class="modal-backdrop hidden" id="modalBackdrop"></div>
       </div>
@@ -851,9 +923,11 @@
             <jot-button variant="ghost" size="sm" id="resolvedButton">resolved</jot-button>`;
     const commentElements = viewOnly ? "" : `
               <div class="highlight-layer" id="highlightLayer"></div>
+              <div class="proposal-layer" id="proposalLayer"></div>
               <button type="button" class="selection-bubble hidden" id="selectionBubble">+ Comment</button>
               <button type="button" class="comment-fab" id="commentFab">+ Comment</button>
               <aside class="thread-rail" id="threadRail"></aside>`;
+    const viewOnlyProposalLayer = viewOnly ? `<div class="proposal-layer" id="proposalLayer"></div>` : "";
     const subtitle = viewOnly ? "" : `<div class="topbar-title-subtle">comments as <span id="commenterLabel">anonymous</span></div>`;
     return `
       <div class="app-root">
@@ -876,11 +950,13 @@
           </div>
           <div class="preview-scroll" id="previewScroll">
             <div class="preview-canvas" id="previewCanvas">
-              <div class="preview-content markdown-body" id="previewContent"></div>
+              <div class="preview-content markdown-body" id="anchorTextRoot"></div>
+              ${viewOnlyProposalLayer}
               ${commentElements}
             </div>
           </div>
         </main>
+        <aside class="ai-sidebar ai-sidebar--overlay" id="aiSidebar"></aside>
         <div class="modal-backdrop hidden" id="modalBackdrop"></div>
       </div>
     `;
@@ -917,14 +993,16 @@
             </div>
             <div class="preview-scroll" id="previewScroll">
               <div class="preview-canvas" id="previewCanvas">
-                <div class="preview-content markdown-body" id="previewContent"></div>
+                <div class="preview-content markdown-body" id="anchorTextRoot"></div>
                 <div class="highlight-layer" id="highlightLayer"></div>
+                <div class="proposal-layer" id="proposalLayer"></div>
                 <button type="button" class="selection-bubble hidden" id="selectionBubble">+ Comment</button>
                 <button type="button" class="comment-fab" id="commentFab">+ Comment</button>
                 <aside class="thread-rail" id="threadRail"></aside>
               </div>
             </div>
           </section>
+          <aside class="ai-sidebar" id="aiSidebar"></aside>
         </main>
         <div class="modal-backdrop hidden" id="modalBackdrop"></div>
       </div>
@@ -1119,10 +1197,7 @@
     try {
       const payload = await api(aiBasePath(publicMode));
       state.ai = payload.ai;
-      renderAiButton(refs);
-      if (state.aiPanelOpen) {
-        renderAiPanel(refs, publicMode);
-      }
+      syncAiUi(refs, publicMode);
     } catch (error) {
       console.error("Failed to reload AI state:", error);
     }
@@ -1144,10 +1219,7 @@
       turn.content = msg.content || "";
       turn.updatedAt = state.ai.activeRun.updatedAt;
     }
-    renderAiButton(refs);
-    if (state.aiPanelOpen) {
-      renderAiPanel(refs, publicMode);
-    }
+    syncAiUi(refs, publicMode);
   }
 
   function applyAiToolActivity(msg, refs, publicMode) {
@@ -1165,9 +1237,7 @@
     } else {
       state.ai.activeRun.toolActivities.push(msg.activity);
     }
-    if (state.aiPanelOpen) {
-      renderAiPanel(refs, publicMode);
-    }
+    syncAiUi(refs, publicMode);
   }
 
   function handleAiServerMessage(msg, refs, publicMode) {
@@ -1184,64 +1254,35 @@
     }
   }
 
-  function openAiPanel(refs, publicMode) {
-    renderAiPanel(refs, publicMode);
+  function syncAiUi(refs, publicMode) {
+    renderAiButton(refs);
+    if (state.aiSidebarOpen) {
+      renderAiSidebar(refs, publicMode);
+    }
+    renderProposalDiffs(refs, publicMode);
   }
 
-  function renderAiProposal(proposal, ai) {
-    const canManage = ai.permissions?.canManageProposals;
-    const canPrompt = ai.permissions?.canPrompt;
-    const canAccept = proposal.status === "open" && canManage;
-    const canReject = (proposal.status === "open" || proposal.status === "stale") && canManage;
-    const meta = proposal.status === "accepted" && proposal.acceptedBy
-      ? `Accepted by ${proposal.acceptedBy.name}`
-      : proposal.status === "rejected" && proposal.rejectedBy
-        ? `Rejected by ${proposal.rejectedBy.name}`
-        : proposal.status === "stale" && proposal.staleReason
-          ? proposal.staleReason
-          : `${proposal.hunks.length} hunk${proposal.hunks.length === 1 ? "" : "s"}`;
-
-    return `
-      <div class="ai-proposal ai-proposal--${escapeHtml(proposal.status)}">
-        <div class="ai-proposal-head">
-          <div>
-            <div class="ai-proposal-title">${escapeHtml(proposal.summary)}</div>
-            <div class="ai-proposal-meta">${escapeHtml(meta)}</div>
-          </div>
-          <span class="ai-proposal-badge">${escapeHtml(proposal.status)}</span>
-        </div>
-        <div class="ai-proposal-hunks">
-          ${proposal.hunks.map((hunk) => `
-            <div class="ai-proposal-hunk">
-              <div class="ai-proposal-diff">
-                <div>
-                  <div class="ai-proposal-diff-label">Before</div>
-                  <pre>${escapeHtml(hunk.oldText)}</pre>
-                </div>
-                <div>
-                  <div class="ai-proposal-diff-label">After</div>
-                  <pre>${escapeHtml(hunk.newText)}</pre>
-                </div>
-              </div>
-            </div>
-          `).join("")}
-        </div>
-        <div class="ai-proposal-actions">
-          ${canAccept ? `<button type="button" class="ai-action-btn primary" data-ai-accept="${escapeHtml(proposal.id)}">Accept</button>` : ""}
-          ${canReject ? `<button type="button" class="ai-action-btn" data-ai-reject="${escapeHtml(proposal.id)}">Reject</button>` : ""}
-          ${canPrompt ? `<button type="button" class="ai-action-btn" data-ai-revise="${escapeHtml(proposal.id)}">Revise</button>` : ""}
-        </div>
-      </div>
-    `;
+  function toggleAiSidebar(refs, publicMode) {
+    state.aiSidebarOpen = !state.aiSidebarOpen;
+    if (refs.aiSidebar) {
+      refs.aiSidebar.classList.toggle("open", state.aiSidebarOpen);
+    }
+    if (state.aiSidebarOpen) {
+      renderAiSidebar(refs, publicMode);
+    } else if (refs.aiSidebar) {
+      refs.aiSidebar.innerHTML = "";
+    }
+    renderAiButton(refs);
   }
 
   function renderAiTurn(turn, ai) {
-    const proposals = (turn.proposalIds || [])
-      .map((proposalId) => ai.proposals.find((proposal) => proposal.id === proposalId))
-      .filter(Boolean);
     const authorName = turn.role === "assistant" ? (ai.identity?.name || "Jot AI") : (turn.author?.name || "Collaborator");
     const status = turn.status !== "completed" ? ` <span class="ai-turn-status">${escapeHtml(turn.status)}</span>` : "";
     const error = turn.error ? `<div class="ai-turn-error">${escapeHtml(turn.error)}</div>` : "";
+    const proposalCount = turn.proposalIds?.length || 0;
+    const proposalRef = proposalCount
+      ? `<div class="ai-turn-proposal-ref">${proposalCount} proposal${proposalCount === 1 ? "" : "s"} — review inline in the preview</div>`
+      : "";
     return `
       <div class="ai-turn ai-turn--${escapeHtml(turn.role)}">
         <div class="ai-turn-head">
@@ -1250,15 +1291,13 @@
         </div>
         <div class="ai-turn-body">${escapeHtml(turn.content || "")}</div>
         ${error}
-        ${proposals.length ? `<div class="ai-turn-proposals">${proposals.map((proposal) => renderAiProposal(proposal, ai)).join("")}</div>` : ""}
+        ${proposalRef}
       </div>
     `;
   }
 
-  function renderAiPanel(refs, publicMode) {
-    if (!refs.modalBackdrop) return;
-    state.modalOpen = true;
-    state.aiPanelOpen = true;
+  function renderAiSidebar(refs, publicMode) {
+    if (!refs.aiSidebar) return;
 
     const ai = state.ai || {
       identity: { name: "Jot AI" },
@@ -1276,117 +1315,110 @@
     };
 
     const activeRun = ai.activeRun;
-    const activeTurn = activeRun ? ai.turns.find((turn) => turn.id === activeRun.assistantTurnId) : null;
-    const activeTurnProposals = activeTurn
-      ? (activeTurn.proposalIds || [])
-          .map((proposalId) => ai.proposals.find((proposal) => proposal.id === proposalId))
-          .filter(Boolean)
-      : [];
     const toolActivities = activeRun?.toolActivities || [];
     const visibleTurns = activeRun ? ai.turns.filter((turn) => turn.id !== activeRun.assistantTurnId) : ai.turns;
     const emptyState = visibleTurns.length === 0
       ? '<div class="ai-empty-state">No shared AI conversation yet.</div>'
       : visibleTurns.map((turn) => renderAiTurn(turn, ai)).join("");
     const viewerHint = ai.permissions.canPrompt
-      ? "The current note is included automatically with each prompt."
-      : "Editors can ask Jot AI here. You can still review completed turns and proposals.";
+      ? "The current note is included automatically. Proposals appear inline in the preview."
+      : "Editors can prompt Jot AI here. View proposals inline in the preview pane.";
 
-    refs.modalBackdrop.classList.remove("hidden");
-    refs.modalBackdrop.innerHTML = `
-      <div class="modal ai-panel-modal" role="dialog" aria-modal="true">
-        <div class="ai-panel">
-          <div class="ai-panel-header">
-            <div>
-              <h2 class="settings-title">Jot AI</h2>
-              <div class="ai-panel-subtitle">${escapeHtml(viewerHint)}</div>
-            </div>
-            <div class="ai-panel-header-actions">
-              <button type="button" class="ai-action-btn" id="aiRefreshBtn">Refresh</button>
-              ${ai.permissions.canReset ? '<button type="button" class="ai-action-btn" id="aiResetBtn">Reset</button>' : ""}
-              <jot-icon-button icon="close" label="Close" id="aiPanelClose"></jot-icon-button>
-            </div>
+    const promptInputWasFocused = refs.aiSidebar.contains(document.activeElement) && document.activeElement?.id === "aiPromptInput";
+    const prevScrollTop = refs.aiSidebar.querySelector("#aiSidebarConversation")?.scrollTop ?? 0;
+
+    refs.aiSidebar.innerHTML = `
+      <div class="ai-sidebar-inner">
+        <div class="ai-sidebar-header">
+          <div>
+            <div class="ai-sidebar-title">Jot AI</div>
+            <div class="ai-sidebar-subtitle">${escapeHtml(viewerHint)}</div>
           </div>
-          <div class="ai-panel-conversation" id="aiPanelConversation">
-            ${emptyState}
-            ${activeRun && ai.permissions.canViewLive ? `
-              <div class="ai-live-run">
-                <div class="ai-live-run-head">
-                  <span class="ai-turn-author">${escapeHtml(ai.identity?.name || "Jot AI")}</span>
-                  <span class="ai-turn-meta">${activeRun.status === "cancelling" ? "Cancelling" : "Streaming"}</span>
-                </div>
-                <div class="ai-turn-body">${escapeHtml(activeRun.content || "")}</div>
-                ${toolActivities.length ? `
-                  <div class="ai-tool-list">
-                    ${toolActivities.map((activity) => `
-                      <div class="ai-tool-item ai-tool-item--${escapeHtml(activity.status)}">
-                        <span>${escapeHtml(activity.toolName)}</span>
-                        <span>${escapeHtml(activity.status)}</span>
-                      </div>
-                    `).join("")}
-                  </div>
-                ` : ""}
-                ${activeTurnProposals.length ? `<div class="ai-turn-proposals">${activeTurnProposals.map((proposal) => renderAiProposal(proposal, ai)).join("")}</div>` : ""}
+          <div class="ai-sidebar-header-actions">
+            <button type="button" class="ai-action-btn" id="aiRefreshBtn">Refresh</button>
+            ${ai.permissions.canReset ? '<button type="button" class="ai-action-btn" id="aiResetBtn">Reset</button>' : ""}
+            <jot-icon-button icon="close" label="Close AI sidebar" id="aiSidebarClose"></jot-icon-button>
+          </div>
+        </div>
+        <div class="ai-sidebar-conversation" id="aiSidebarConversation">
+          ${emptyState}
+          ${activeRun && ai.permissions.canViewLive ? `
+            <div class="ai-live-run">
+              <div class="ai-live-run-head">
+                <span class="ai-turn-author">${escapeHtml(ai.identity?.name || "Jot AI")}</span>
+                <span class="ai-turn-meta">${activeRun.status === "cancelling" ? "Cancelling" : "Streaming"}</span>
               </div>
-            ` : ""}
-          </div>
-          <div class="ai-panel-footer">
-            ${ai.permissions.canPrompt ? `
-              <form id="aiPromptForm" class="ai-prompt-form">
-                <textarea id="aiPromptInput" class="ai-prompt-input" placeholder="Ask Jot AI to draft, revise, summarize, or propose changes...">${escapeHtml(state.aiDraft)}</textarea>
-                <div class="ai-prompt-actions">
-                  <span class="ai-panel-subtitle">${ai.queueDepth > 0 ? "Wait for the current AI turn to finish." : "Shared conversation for this note."}</span>
-                  <div class="ai-prompt-buttons">
-                    ${ai.permissions.canCancel && activeRun ? '<button type="button" class="ai-action-btn" id="aiCancelBtn">Cancel</button>' : ""}
-                    <button type="submit" class="ai-action-btn primary" id="aiSendBtn" ${ai.queueDepth > 0 ? "disabled" : ""}>Send</button>
-                  </div>
+              <div class="ai-turn-body">${escapeHtml(activeRun.content || "")}</div>
+              ${toolActivities.length ? `
+                <div class="ai-tool-list">
+                  ${toolActivities.map((activity) => `
+                    <div class="ai-tool-item ai-tool-item--${escapeHtml(activity.status)}">
+                      <span>${escapeHtml(activity.toolName)}</span>
+                      <span>${escapeHtml(activity.status)}</span>
+                    </div>
+                  `).join("")}
                 </div>
-              </form>
-            ` : ""}
-          </div>
+              ` : ""}
+            </div>
+          ` : ""}
+        </div>
+        <div class="ai-sidebar-footer">
+          ${ai.permissions.canPrompt ? `
+            <form id="aiPromptForm" class="ai-prompt-form">
+              <textarea id="aiPromptInput" class="ai-prompt-input" placeholder="Ask Jot AI to draft, revise, summarize, or propose changes — proposals appear inline in the preview…">${escapeHtml(state.aiDraft)}</textarea>
+              <div class="ai-prompt-actions">
+                <span class="ai-sidebar-subtitle">${ai.queueDepth > 0 ? "Wait for the current turn to finish." : "Shared for this note."}</span>
+                <div class="ai-prompt-buttons">
+                  ${ai.permissions.canCancel && activeRun ? '<button type="button" class="ai-action-btn" id="aiCancelBtn">Cancel</button>' : ""}
+                  <button type="submit" class="ai-action-btn primary" id="aiSendBtn" ${ai.queueDepth > 0 ? "disabled" : ""}>Send</button>
+                </div>
+              </div>
+            </form>
+          ` : ""}
         </div>
       </div>
     `;
 
-    const close = () => closeModal(refs);
-    refs.modalBackdrop.querySelector("#aiPanelClose")?.addEventListener("click", close);
-    refs.modalBackdrop.onclick = (event) => {
-      if (event.target === refs.modalBackdrop) {
-        close();
-      }
-    };
+    // Restore scroll position
+    const conversation = refs.aiSidebar.querySelector("#aiSidebarConversation");
+    if (conversation) {
+      conversation.scrollTop = prevScrollTop > 0 ? prevScrollTop : conversation.scrollHeight;
+    }
 
-    refs.modalBackdrop.querySelector("#aiRefreshBtn")?.addEventListener("click", () => reloadAiState(publicMode, refs));
-    refs.modalBackdrop.querySelector("#aiResetBtn")?.addEventListener("click", async () => {
+    // Restore focus to prompt textarea if it was focused
+    const promptInput = refs.aiSidebar.querySelector("#aiPromptInput");
+    if (promptInput) {
+      promptInput.addEventListener("input", () => { state.aiDraft = promptInput.value; });
+      if (promptInputWasFocused) {
+        promptInput.focus();
+        promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
+      }
+    }
+
+    refs.aiSidebar.querySelector("#aiSidebarClose")?.addEventListener("click", () => toggleAiSidebar(refs, publicMode));
+
+    refs.aiSidebar.querySelector("#aiRefreshBtn")?.addEventListener("click", () => reloadAiState(publicMode, refs));
+    refs.aiSidebar.querySelector("#aiResetBtn")?.addEventListener("click", async () => {
       if (!confirm("Clear the shared AI conversation and proposals for this note?")) return;
       try {
         const payload = await api(`${aiBasePath(publicMode)}/reset`, { method: "POST" });
         state.ai = payload.ai;
-        renderAiButton(refs);
-        renderAiPanel(refs, publicMode);
+        syncAiUi(refs, publicMode);
       } catch (error) {
         alert(error.message || "Failed to reset AI state.");
       }
     });
-    refs.modalBackdrop.querySelector("#aiCancelBtn")?.addEventListener("click", async () => {
+    refs.aiSidebar.querySelector("#aiCancelBtn")?.addEventListener("click", async () => {
       try {
         const payload = await api(`${aiBasePath(publicMode)}/cancel`, { method: "POST" });
         state.ai = payload.ai;
-        renderAiButton(refs);
-        renderAiPanel(refs, publicMode);
+        syncAiUi(refs, publicMode);
       } catch (error) {
         alert(error.message || "Failed to cancel the AI run.");
       }
     });
 
-    const promptInput = refs.modalBackdrop.querySelector("#aiPromptInput");
-    if (promptInput) {
-      promptInput.addEventListener("input", () => {
-        state.aiDraft = promptInput.value;
-      });
-      setTimeout(() => promptInput.focus(), 30);
-    }
-
-    refs.modalBackdrop.querySelector("#aiPromptForm")?.addEventListener("submit", async (event) => {
+    refs.aiSidebar.querySelector("#aiPromptForm")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const prompt = state.aiDraft.trim();
       if (!prompt) return;
@@ -1397,54 +1429,110 @@
         });
         state.aiDraft = "";
         state.ai = payload.ai;
-        renderAiButton(refs);
-        renderAiPanel(refs, publicMode);
+        syncAiUi(refs, publicMode);
       } catch (error) {
         alert(error.message || "Failed to send the AI prompt.");
       }
     });
+  }
 
-    refs.modalBackdrop.querySelectorAll("[data-ai-accept]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const proposalId = button.getAttribute("data-ai-accept");
-        try {
-          const payload = await api(`${aiBasePath(publicMode)}/proposals/${proposalId}/accept`, { method: "POST" });
-          state.ai = payload.ai;
-          renderAiButton(refs);
-          renderAiPanel(refs, publicMode);
-        } catch (error) {
-          alert(error.message || "Failed to accept the proposal.");
+  function renderProposalDiffs(refs, publicMode) {
+    const layer = refs.proposalLayer || document.getElementById("proposalLayer");
+    if (!layer) return;
+    layer.innerHTML = "";
+
+    const ai = state.ai;
+    if (!ai || !refs.previewContent || !refs.previewCanvas) return;
+
+    const relevantProposals = ai.proposals.filter((p) => p.status === "open" || p.status === "stale");
+    if (!relevantProposals.length) return;
+
+    const canManage = ai.permissions?.canManageProposals;
+    const canPrompt = ai.permissions?.canPrompt;
+    const canvasRect = refs.previewCanvas.getBoundingClientRect();
+    const mapping = collectTextNodes(refs.previewContent);
+
+    const placedCards = [];
+
+    relevantProposals.forEach((proposal) => {
+      proposal.hunks.forEach((hunk, hunkIdx) => {
+        const display = hunk.display;
+        let cardTop = null;
+        let isLocated = false;
+
+        if (display?.state === "resolved" && display.renderedStart != null && display.renderedEnd != null) {
+          const range = offsetsToRange(mapping, display.renderedStart, display.renderedEnd);
+          if (range) {
+            const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0);
+            if (rects.length) {
+              const merged = mergeRects(rects, canvasRect);
+              for (const rect of merged) {
+                const hl = document.createElement("div");
+                hl.className = "proposal-highlight";
+                hl.style.left = `${rect.left}px`;
+                hl.style.top = `${rect.top}px`;
+                hl.style.width = `${rect.width}px`;
+                hl.style.height = `${rect.height}px`;
+                layer.appendChild(hl);
+              }
+              cardTop = rects[0].top - canvasRect.top;
+              isLocated = true;
+            }
+          }
         }
-      });
-    });
 
-    refs.modalBackdrop.querySelectorAll("[data-ai-reject]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const proposalId = button.getAttribute("data-ai-reject");
-        try {
-          const payload = await api(`${aiBasePath(publicMode)}/proposals/${proposalId}/reject`, { method: "POST" });
-          state.ai = payload.ai;
-          renderAiButton(refs);
-          renderAiPanel(refs, publicMode);
-        } catch (error) {
-          alert(error.message || "Failed to reject the proposal.");
+        if (cardTop == null) {
+          // Fallback: stack cards at top of the layer
+          cardTop = 16 + placedCards.length * 8;
         }
+
+        const hunkLabel = proposal.hunks.length > 1 ? ` (${hunkIdx + 1}/${proposal.hunks.length})` : "";
+        const statusCls = proposal.status === "stale" || !isLocated ? " proposal-card--stale" : "";
+        const canAccept = isLocated && proposal.status === "open" && canManage;
+        const canReject = (proposal.status === "open" || proposal.status === "stale") && canManage;
+        const warningHtml = !isLocated
+          ? `<div class="proposal-warning">${escapeHtml(hunk.display?.reason || proposal.staleReason || "Cannot locate in preview")}</div>`
+          : "";
+
+        const oldSnip = (hunk.oldText || "").slice(0, 180) + ((hunk.oldText || "").length > 180 ? "…" : "");
+        const newSnip = (hunk.newText || "").slice(0, 180) + ((hunk.newText || "").length > 180 ? "…" : "");
+
+        const cardEl = document.createElement("div");
+        cardEl.className = `proposal-card${statusCls}`;
+        cardEl.dataset.proposalId = proposal.id;
+        cardEl.innerHTML = `
+          <div class="proposal-card-head">
+            <div class="proposal-card-title">${escapeHtml(proposal.summary + hunkLabel)}</div>
+            <span class="proposal-card-badge">${escapeHtml(proposal.status)}</span>
+          </div>
+          ${warningHtml}
+          ${isLocated ? `<div class="proposal-card-diff">
+            <div>
+              <div class="proposal-card-diff-label">Before</div>
+              <pre>${escapeHtml(oldSnip)}</pre>
+            </div>
+            <div>
+              <div class="proposal-card-diff-label">After</div>
+              <pre>${escapeHtml(newSnip)}</pre>
+            </div>
+          </div>` : ""}
+          <div class="proposal-card-actions">
+            ${canAccept ? `<button type="button" class="ai-action-btn primary" data-ai-accept="${escapeHtml(proposal.id)}">Accept</button>` : ""}
+            ${canReject ? `<button type="button" class="ai-action-btn" data-ai-reject="${escapeHtml(proposal.id)}">Reject</button>` : ""}
+            ${canPrompt ? `<button type="button" class="ai-action-btn" data-ai-revise="${escapeHtml(proposal.id)}">Revise</button>` : ""}
+          </div>
+        `;
+        layer.appendChild(cardEl);
+        placedCards.push({ el: cardEl, desiredTop: cardTop });
       });
     });
 
-    refs.modalBackdrop.querySelectorAll("[data-ai-revise]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const proposalId = button.getAttribute("data-ai-revise");
-        const proposal = ai.proposals.find((item) => item.id === proposalId);
-        if (!proposal) return;
-        state.aiDraft = `Refresh the proposal "${proposal.summary}" against the current note and create a new reviewable proposal.`;
-        renderAiPanel(refs, publicMode);
-      });
-    });
-
-    const conversation = refs.modalBackdrop.querySelector("#aiPanelConversation");
-    if (conversation) {
-      conversation.scrollTop = conversation.scrollHeight;
+    // Collide-correct card positions
+    let cursor = 0;
+    for (const item of placedCards) {
+      const top = Math.max(cursor, item.desiredTop);
+      item.el.style.top = `${top}px`;
+      cursor = top + item.el.offsetHeight + 8;
     }
   }
 
@@ -1890,7 +1978,6 @@
 
   function closeModal(refs) {
     state.modalOpen = false;
-    state.aiPanelOpen = false;
     refs.modalBackdrop.onclick = null;
     refs.modalBackdrop.classList.add("hidden");
     refs.modalBackdrop.innerHTML = "";
@@ -2061,6 +2148,7 @@
   }
 
   function findAnchorAtPoint(x, y, layer) {
+    if (!layer) return null;
     const anchors = layer.querySelectorAll(".anchor-highlight");
     for (const anchor of anchors) {
       const rect = anchor.getBoundingClientRect();
