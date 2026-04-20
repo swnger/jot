@@ -146,10 +146,26 @@ const commenterNameCookieName = "md_commenter_name";
 const ownerCookieMaxAgeSeconds = 60 * 60 * 24 * 30;
 const commenterCookieMaxAgeSeconds = 60 * 60 * 24 * 365;
 const notes = new Map<string, NoteRecord>();
+function htmlToText(html: string): string {
+  // Strip HTML tags and decode basic entities.
+  // The marked output uses \n between block elements (e.g. </h1>\n<h2>),
+  // and the browser's collectTextNodes sees those \n as text nodes.
+  // So we just strip tags and decode entities — no extra newline insertion.
+  return html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
 const aiRuntime = new AiRuntimeManager(notesDir, {
   onStateUpdated: (noteId) => broadcastAiStateUpdated(noteId),
   onMessageDelta: (event) => broadcastAiMessageDelta(event),
   onToolActivity: (event) => broadcastAiToolActivity(event.noteId, event.runId, event.activity),
+  renderMarkdownToText: (md: string) => htmlToText(renderMarkdown(md)),
 });
 
 const codeRenderer = new marked.Renderer();

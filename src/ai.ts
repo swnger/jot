@@ -183,6 +183,7 @@ type AiCallbacks = {
   onStateUpdated: (noteId: string) => void;
   onMessageDelta: (event: AiDeltaEvent) => void;
   onToolActivity: (event: AiToolEvent) => void;
+  renderMarkdownToText: (markdown: string) => string;
 };
 
 type LiveRun = {
@@ -425,12 +426,48 @@ function resolveProposalAnchor(markdown: string, hunk: AiProposalHunk) {
   };
 }
 
-function computeHunkDisplay(markdown: string, hunk: AiProposalHunk): ProposalHunkDisplay {
+function computeHunkDisplay(markdown: string, hunk: AiProposalHunk, renderMarkdownToText?: (md: string) => string): ProposalHunkDisplay {
   const result = resolveProposalAnchor(markdown, hunk);
   if (!result.ok) {
     const resolveState = result.reason.toLowerCase().includes("ambiguous") ? "ambiguous" : "stale";
     return { state: resolveState, reason: result.reason };
   }
+
+  // Convert raw markdown offsets to rendered-text offsets
+  if (renderMarkdownToText) {
+    const renderedText = renderMarkdownToText(markdown);
+    const oldRenderedText = renderMarkdownToText(hunk.oldText);
+    // Find the rendered text of the matched region in the full rendered text
+    if (oldRenderedText) {
+      // Try to locate the rendered old text in the full rendered output
+      // Use the prefix rendered text length as an approximate start position
+      const prefixMarkdown = markdown.slice(0, result.start);
+      const renderedPrefix = renderMarkdownToText(prefixMarkdown);
+      const approxStart = renderedPrefix.length;
+      // Search near the approximate position for an exact match
+      const searchStart = Math.max(0, approxStart - 20);
+      const searchEnd = Math.min(renderedText.length, approxStart + oldRenderedText.length + 20);
+      const searchRegion = renderedText.slice(searchStart, searchEnd);
+      const idx = searchRegion.indexOf(oldRenderedText);
+      if (idx !== -1) {
+        const renderedStart = searchStart + idx;
+        const renderedEnd = renderedStart + oldRenderedText.length;
+        return {
+          state: "resolved",
+          renderedStart,
+          renderedEnd,
+        };
+      }
+      // Fallback: use the approximate prefix-based offset
+      const fallbackEnd = Math.min(approxStart + oldRenderedText.length, renderedText.length);
+      return {
+        state: "resolved",
+        renderedStart: approxStart,
+        renderedEnd: fallbackEnd,
+      };
+    }
+  }
+
   return {
     state: "resolved",
     renderedStart: result.start,
@@ -637,7 +674,7 @@ export class AiRuntimeManager {
       }
       let becameStale = false;
       for (const hunk of proposal.hunks) {
-        const newDisplay = computeHunkDisplay(note.markdown, hunk);
+        const newDisplay = computeHunkDisplay(note.markdown, hunk, this.callbacks.renderMarkdownToText);
         const prevDisplay = hunk.display;
         if (
           prevDisplay?.state !== newDisplay.state
@@ -836,7 +873,7 @@ export class AiRuntimeManager {
                   newText: rawHunk.newText,
                   anchor,
                 };
-                hunk.display = computeHunkDisplay(note.markdown, hunk);
+                hunk.display = computeHunkDisplay(note.markdown, hunk, this.callbacks.renderMarkdownToText);
                 hunks.push(hunk);
               }
 

@@ -578,7 +578,7 @@
       if (event.target.closest(".thread-rail") || event.target.closest(".selection-bubble")) {
         return;
       }
-      if (event.target.closest(".proposal-layer")) {
+      if (event.target.closest(".proposal-layer") || event.target.closest(".inline-diff") || event.target.closest(".editor-diff-overlay")) {
         return;
       }
       const threadId = findAnchorAtPoint(event.clientX, event.clientY, highlightLayer);
@@ -593,48 +593,48 @@
       }
     });
 
-    // Proposal layer: delegated event handler for accept/reject/revise
-    if (proposalLayer) {
-      proposalLayer.addEventListener("click", async (e) => {
-        const acceptBtn = e.target.closest("[data-ai-accept]");
-        if (acceptBtn) {
-          e.stopPropagation();
-          const proposalId = acceptBtn.getAttribute("data-ai-accept");
-          try {
-            const payload = await api(`${aiBasePath(isPublic)}/proposals/${proposalId}/accept`, { method: "POST" });
-            state.ai = payload.ai;
-            syncAiUi(refs, isPublic);
-          } catch (err) { alert(err.message || "Failed to accept the proposal."); }
-          return;
-        }
-        const rejectBtn = e.target.closest("[data-ai-reject]");
-        if (rejectBtn) {
-          e.stopPropagation();
-          const proposalId = rejectBtn.getAttribute("data-ai-reject");
-          try {
-            const payload = await api(`${aiBasePath(isPublic)}/proposals/${proposalId}/reject`, { method: "POST" });
-            state.ai = payload.ai;
-            syncAiUi(refs, isPublic);
-          } catch (err) { alert(err.message || "Failed to reject the proposal."); }
-          return;
-        }
-        const reviseBtn = e.target.closest("[data-ai-revise]");
-        if (reviseBtn) {
-          e.stopPropagation();
-          const proposalId = reviseBtn.getAttribute("data-ai-revise");
-          const proposal = state.ai?.proposals.find((p) => p.id === proposalId);
-          if (proposal) {
-            state.aiDraft = `Refresh the proposal "${proposal.summary}" against the current note and create a new reviewable proposal.`;
-            if (!state.aiSidebarOpen) {
-              toggleAiSidebar(refs, isPublic);
-            } else {
-              renderAiSidebar(refs, isPublic);
-            }
+    // Proposal actions: delegated event handler for accept/reject/revise
+    // Handles clicks from proposal layer, editor diff overlay, and preview inline diffs
+    function handleProposalAction(e) {
+      const acceptBtn = e.target.closest("[data-ai-accept]");
+      if (acceptBtn) {
+        e.stopPropagation();
+        const proposalId = acceptBtn.getAttribute("data-ai-accept");
+        api(`${aiBasePath(isPublic)}/proposals/${proposalId}/accept`, { method: "POST" })
+          .then((payload) => { state.ai = payload.ai; syncAiUi(refs, isPublic); })
+          .catch((err) => alert(err.message || "Failed to accept the proposal."));
+        return;
+      }
+      const rejectBtn = e.target.closest("[data-ai-reject]");
+      if (rejectBtn) {
+        e.stopPropagation();
+        const proposalId = rejectBtn.getAttribute("data-ai-reject");
+        api(`${aiBasePath(isPublic)}/proposals/${proposalId}/reject`, { method: "POST" })
+          .then((payload) => { state.ai = payload.ai; syncAiUi(refs, isPublic); })
+          .catch((err) => alert(err.message || "Failed to reject the proposal."));
+        return;
+      }
+      const reviseBtn = e.target.closest("[data-ai-revise]");
+      if (reviseBtn) {
+        e.stopPropagation();
+        const proposalId = reviseBtn.getAttribute("data-ai-revise");
+        const proposal = state.ai?.proposals.find((p) => p.id === proposalId);
+        if (proposal) {
+          state.aiDraft = `Refresh the proposal "${proposal.summary}" against the current note and create a new reviewable proposal.`;
+          if (!state.aiSidebarOpen) {
+            toggleAiSidebar(refs, isPublic);
+          } else {
+            renderAiSidebar(refs, isPublic);
           }
-          return;
         }
-      });
+        return;
+      }
     }
+    if (proposalLayer) proposalLayer.addEventListener("click", handleProposalAction);
+    // Also handle clicks on editor diff overlay and preview inline diffs
+    const editorPaneEl = editorTextarea?.closest(".editor-pane");
+    if (editorPaneEl) editorPaneEl.addEventListener("click", handleProposalAction);
+    if (previewCanvas) previewCanvas.addEventListener("click", handleProposalAction);
 
     if (commentFab) {
       commentFab.addEventListener("click", () => {
@@ -1437,103 +1437,220 @@
   }
 
   function renderProposalDiffs(refs, publicMode) {
+    // Clean up previous inline diffs in preview
+    const previewContent = refs.previewContent || document.getElementById("anchorTextRoot");
+    if (previewContent) previewContent.querySelectorAll(".inline-diff").forEach((el) => el.remove());
+    // Clean up previous editor diff overlay
+    const editorPane = refs.editorTextarea?.closest(".editor-pane");
+    const prevOverlay = editorPane?.querySelector(".editor-diff-overlay");
+    if (prevOverlay) prevOverlay.remove();
+    if (refs.editorTextarea) refs.editorTextarea.classList.remove("hidden-by-diff");
+    // Clear the proposal overlay layer
     const layer = refs.proposalLayer || document.getElementById("proposalLayer");
-    if (!layer) return;
-    layer.innerHTML = "";
+    if (layer) layer.innerHTML = "";
 
     const ai = state.ai;
-    if (!ai || !refs.previewContent || !refs.previewCanvas) return;
+    if (!ai) return;
 
     const relevantProposals = ai.proposals.filter((p) => p.status === "open" || p.status === "stale");
     if (!relevantProposals.length) return;
 
     const canManage = ai.permissions?.canManageProposals;
     const canPrompt = ai.permissions?.canPrompt;
-    const canvasRect = refs.previewCanvas.getBoundingClientRect();
-    const mapping = collectTextNodes(refs.previewContent);
 
-    const placedCards = [];
+    // --- Editor pane: show full-file diff overlay ---
+    if (refs.editorTextarea && editorPane) {
+      renderEditorDiffOverlay(refs, relevantProposals, canManage, canPrompt);
+    }
 
-    relevantProposals.forEach((proposal) => {
+    // --- Preview pane: inject inline diffs ---
+    if (previewContent) {
+      renderPreviewInlineDiffs(refs, previewContent, relevantProposals, canManage, canPrompt);
+    }
+  }
+
+  function renderEditorDiffOverlay(refs, proposals, canManage, canPrompt) {
+    const editorPane = refs.editorTextarea.closest(".editor-pane");
+    const markdown = refs.editorTextarea.value || "";
+    const lines = markdown.split("\n");
+
+    // Build a merged diff view of the full file with all proposal hunks applied
+    // For simplicity, handle hunks sequentially (non-overlapping)
+    const allHunks = [];
+    for (const proposal of proposals) {
+      for (const hunk of proposal.hunks) {
+        if (hunk.display?.state !== "resolved") continue;
+        // Find oldText line range in the original markdown
+        const startIdx = markdown.indexOf(hunk.oldText);
+        if (startIdx === -1) continue;
+        const oldEndIdx = startIdx + hunk.oldText.length;
+        const lineStartIdx = markdown.lastIndexOf("\n", startIdx - 1) + 1;
+        const oldEndForLine = hunk.oldText.endsWith("\n") && hunk.oldText.length > 1 ? oldEndIdx - 1 : oldEndIdx;
+        const nextLineBreakIdx = markdown.indexOf("\n", oldEndForLine);
+        const lineEndIdx = nextLineBreakIdx === -1 ? markdown.length : nextLineBreakIdx;
+        const oldBlock = markdown.slice(lineStartIdx, lineEndIdx);
+        const newBlock = `${markdown.slice(lineStartIdx, startIdx)}${hunk.newText}${markdown.slice(oldEndIdx, lineEndIdx)}`;
+        const startLine = markdown.slice(0, lineStartIdx).split("\n").length - 1;
+        const oldLines = oldBlock.replace(/\n$/, "").split("\n");
+        allHunks.push({
+          proposal,
+          hunk,
+          startLine,
+          oldLineCount: oldLines.length,
+          oldLines,
+          newLines: newBlock.replace(/\n$/, "").split("\n"),
+        });
+      }
+    }
+    // Sort by start line
+    allHunks.sort((a, b) => a.startLine - b.startLine);
+
+    // Build the full-file diff output
+    const parts = [];
+    let cursor = 0;
+    for (const h of allHunks) {
+      // Context lines before this hunk
+      for (let i = cursor; i < h.startLine; i++) {
+        parts.push(`<div class="diff-line diff-ctx"><span class="diff-marker"> </span><span class="diff-text">${escapeHtml(lines[i])}</span></div>`);
+      }
+      // Removed lines
+      for (const ol of h.oldLines) {
+        parts.push(`<div class="diff-line diff-del"><span class="diff-marker">−</span><span class="diff-text">${escapeHtml(ol)}</span></div>`);
+      }
+      // Added lines
+      for (const nl of h.newLines) {
+        parts.push(`<div class="diff-line diff-add"><span class="diff-marker">+</span><span class="diff-text">${escapeHtml(nl)}</span></div>`);
+      }
+      cursor = h.startLine + h.oldLineCount;
+    }
+    // Remaining context lines
+    for (let i = cursor; i < lines.length; i++) {
+      parts.push(`<div class="diff-line diff-ctx"><span class="diff-marker"> </span><span class="diff-text">${escapeHtml(lines[i])}</span></div>`);
+    }
+
+    // Build action buttons for each proposal
+    const actionSets = proposals.map((proposal) => {
+      const canAccept = proposal.status === "open" && canManage;
+      const canReject = (proposal.status === "open" || proposal.status === "stale") && canManage;
+      const isStale = proposal.status === "stale";
+      return `<div class="editor-diff-proposal-actions${isStale ? " editor-diff-proposal-actions--stale" : ""}">
+        <span class="editor-diff-proposal-label">${escapeHtml(proposal.summary)}</span>
+        ${canAccept ? `<button type="button" class="ai-action-btn primary" data-ai-accept="${escapeHtml(proposal.id)}">Accept</button>` : ""}
+        ${canReject ? `<button type="button" class="ai-action-btn" data-ai-reject="${escapeHtml(proposal.id)}">Reject</button>` : ""}
+        ${canPrompt ? `<button type="button" class="ai-action-btn" data-ai-revise="${escapeHtml(proposal.id)}">Revise</button>` : ""}
+      </div>`;
+    }).join("");
+
+    const overlay = document.createElement("div");
+    overlay.className = "editor-diff-overlay";
+    overlay.innerHTML = `
+      <div class="editor-diff-actions-bar">${actionSets}</div>
+      <div class="editor-diff-content">${parts.join("")}</div>
+    `;
+
+    refs.editorTextarea.classList.add("hidden-by-diff");
+    editorPane.appendChild(overlay);
+  }
+
+  function renderPreviewInlineDiffs(refs, previewContent, proposals, canManage, canPrompt) {
+    const mapping = collectTextNodes(previewContent);
+
+    proposals.forEach((proposal) => {
       proposal.hunks.forEach((hunk, hunkIdx) => {
         const display = hunk.display;
-        let cardTop = null;
-        let isLocated = false;
-
-        if (display?.state === "resolved" && display.renderedStart != null && display.renderedEnd != null) {
-          const range = offsetsToRange(mapping, display.renderedStart, display.renderedEnd);
-          if (range) {
-            const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0);
-            if (rects.length) {
-              const merged = mergeRects(rects, canvasRect);
-              for (const rect of merged) {
-                const hl = document.createElement("div");
-                hl.className = "proposal-highlight";
-                hl.style.left = `${rect.left}px`;
-                hl.style.top = `${rect.top}px`;
-                hl.style.width = `${rect.width}px`;
-                hl.style.height = `${rect.height}px`;
-                layer.appendChild(hl);
-              }
-              cardTop = rects[0].top - canvasRect.top;
-              isLocated = true;
-            }
-          }
-        }
-
-        if (cardTop == null) {
-          // Fallback: stack cards at top of the layer
-          cardTop = 16 + placedCards.length * 8;
-        }
-
         const hunkLabel = proposal.hunks.length > 1 ? ` (${hunkIdx + 1}/${proposal.hunks.length})` : "";
-        const statusCls = proposal.status === "stale" || !isLocated ? " proposal-card--stale" : "";
-        const canAccept = isLocated && proposal.status === "open" && canManage;
+        const canAccept = proposal.status === "open" && canManage;
         const canReject = (proposal.status === "open" || proposal.status === "stale") && canManage;
-        const warningHtml = !isLocated
-          ? `<div class="proposal-warning">${escapeHtml(hunk.display?.reason || proposal.staleReason || "Cannot locate in preview")}</div>`
+        const isStale = proposal.status === "stale" || display?.state !== "resolved";
+
+        // Build unified diff
+        const oldLines = (hunk.oldText || "").replace(/\n$/, "").split("\n");
+        const newLines = (hunk.newText || "").replace(/\n$/, "").split("\n");
+        const diffHtml = buildUnifiedDiffHtml(oldLines, newLines);
+
+        const warningHtml = isStale
+          ? `<div class="inline-diff-warning">${escapeHtml(display?.reason || proposal.staleReason || "Cannot locate in preview")}</div>`
           : "";
 
-        const oldSnip = (hunk.oldText || "").slice(0, 180) + ((hunk.oldText || "").length > 180 ? "…" : "");
-        const newSnip = (hunk.newText || "").slice(0, 180) + ((hunk.newText || "").length > 180 ? "…" : "");
-
-        const cardEl = document.createElement("div");
-        cardEl.className = `proposal-card${statusCls}`;
-        cardEl.dataset.proposalId = proposal.id;
-        cardEl.innerHTML = `
-          <div class="proposal-card-head">
-            <div class="proposal-card-title">${escapeHtml(proposal.summary + hunkLabel)}</div>
-            <span class="proposal-card-badge">${escapeHtml(proposal.status)}</span>
+        const diffEl = document.createElement("div");
+        diffEl.className = `inline-diff${isStale ? " inline-diff--stale" : ""}`;
+        diffEl.dataset.proposalId = proposal.id;
+        diffEl.innerHTML = `
+          <div class="inline-diff-header">
+            <span class="inline-diff-title">${escapeHtml(proposal.summary + hunkLabel)}</span>
+            <span class="inline-diff-badge">${escapeHtml(proposal.status)}</span>
           </div>
           ${warningHtml}
-          ${isLocated ? `<div class="proposal-card-diff">
-            <div>
-              <div class="proposal-card-diff-label">Before</div>
-              <pre>${escapeHtml(oldSnip)}</pre>
-            </div>
-            <div>
-              <div class="proposal-card-diff-label">After</div>
-              <pre>${escapeHtml(newSnip)}</pre>
-            </div>
-          </div>` : ""}
-          <div class="proposal-card-actions">
+          <div class="inline-diff-body">${diffHtml}</div>
+          <div class="inline-diff-actions">
             ${canAccept ? `<button type="button" class="ai-action-btn primary" data-ai-accept="${escapeHtml(proposal.id)}">Accept</button>` : ""}
             ${canReject ? `<button type="button" class="ai-action-btn" data-ai-reject="${escapeHtml(proposal.id)}">Reject</button>` : ""}
             ${canPrompt ? `<button type="button" class="ai-action-btn" data-ai-revise="${escapeHtml(proposal.id)}">Revise</button>` : ""}
           </div>
         `;
-        layer.appendChild(cardEl);
-        placedCards.push({ el: cardEl, desiredTop: cardTop });
+
+        // Inject inline at matched position
+        let injected = false;
+        if (display?.state === "resolved" && display.renderedStart != null && display.renderedEnd != null) {
+          const range = offsetsToRange(mapping, display.renderedStart, display.renderedEnd);
+          if (range) {
+            const endContainer = range.endContainer;
+            let lastBlock = endContainer.nodeType === Node.TEXT_NODE ? endContainer.parentElement : endContainer;
+            while (lastBlock && lastBlock.parentElement !== previewContent && lastBlock !== previewContent) {
+              lastBlock = lastBlock.parentElement;
+            }
+            if (lastBlock && lastBlock !== previewContent) {
+              lastBlock.after(diffEl);
+              injected = true;
+            }
+          }
+        }
+        if (!injected) {
+          previewContent.appendChild(diffEl);
+        }
       });
     });
+  }
 
-    // Collide-correct card positions
-    let cursor = 0;
-    for (const item of placedCards) {
-      const top = Math.max(cursor, item.desiredTop);
-      item.el.style.top = `${top}px`;
-      cursor = top + item.el.offsetHeight + 8;
+  function buildUnifiedDiffHtml(oldLines, newLines) {
+    const lcs = computeLcs(oldLines, newLines);
+    let oi = 0, ni = 0, li = 0;
+    const parts = [];
+
+    while (oi < oldLines.length || ni < newLines.length) {
+      if (li < lcs.length && oi < oldLines.length && ni < newLines.length && oldLines[oi] === lcs[li] && newLines[ni] === lcs[li]) {
+        parts.push(`<div class="diff-line diff-ctx"><span class="diff-marker"> </span><span class="diff-text">${escapeHtml(oldLines[oi])}</span></div>`);
+        oi++; ni++; li++;
+      } else {
+        while (oi < oldLines.length && (li >= lcs.length || oldLines[oi] !== lcs[li])) {
+          parts.push(`<div class="diff-line diff-del"><span class="diff-marker">−</span><span class="diff-text">${escapeHtml(oldLines[oi])}</span></div>`);
+          oi++;
+        }
+        while (ni < newLines.length && (li >= lcs.length || newLines[ni] !== lcs[li])) {
+          parts.push(`<div class="diff-line diff-add"><span class="diff-marker">+</span><span class="diff-text">${escapeHtml(newLines[ni])}</span></div>`);
+          ni++;
+        }
+      }
     }
+    return parts.join("");
+  }
+
+  function computeLcs(a, b) {
+    const m = a.length, n = b.length;
+    const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+    const result = [];
+    let i = m, j = n;
+    while (i > 0 && j > 0) {
+      if (a[i - 1] === b[j - 1]) { result.unshift(a[i - 1]); i--; j--; }
+      else if (dp[i - 1][j] >= dp[i][j - 1]) { i--; }
+      else { j--; }
+    }
+    return result;
   }
 
   function updateResolvedButton(button) {
