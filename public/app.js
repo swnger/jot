@@ -4,6 +4,7 @@
   const page = document.body.dataset.page;
   const noteId = document.body.dataset.noteId || "";
   const shareId = document.body.dataset.shareId || "";
+  const aiModelStorageKey = "jot_ai_model";
 
   if (!app || !page) {
     return;
@@ -113,6 +114,7 @@
     aiSidebarOpen: false,
     ai: null,
     aiDraft: "",
+    aiSelectedModel: window.localStorage.getItem(aiModelStorageKey) || "",
     renderGeneration: 0,
   };
 
@@ -1296,11 +1298,28 @@
     `;
   }
 
+  function getAiModelOptions(ai) {
+    const defaultModel = String(ai.defaultModel || "gpt-5");
+    const configured = Array.isArray(ai.availableModels) ? ai.availableModels : [];
+    return [...new Set([defaultModel, ...configured].map((model) => String(model || "").trim()).filter(Boolean))];
+  }
+
+  function getSelectedAiModel(ai) {
+    const options = getAiModelOptions(ai);
+    const defaultModel = String(ai.defaultModel || options[0] || "gpt-5");
+    if (!state.aiSelectedModel || !options.includes(state.aiSelectedModel)) {
+      state.aiSelectedModel = options.includes(defaultModel) ? defaultModel : options[0];
+    }
+    return state.aiSelectedModel;
+  }
+
   function renderAiSidebar(refs, publicMode) {
     if (!refs.aiSidebar) return;
 
     const ai = state.ai || {
       identity: { name: "Jot AI" },
+      defaultModel: "gpt-5",
+      availableModels: ["gpt-5"],
       turns: [],
       proposals: [],
       activeRun: null,
@@ -1323,6 +1342,11 @@
     const viewerHint = ai.permissions.canPrompt
       ? "The current note is included automatically. Proposals appear inline in the preview."
       : "Editors can prompt Jot AI here. View proposals inline in the preview pane.";
+    const selectedModel = getSelectedAiModel(ai);
+    const modelOptions = getAiModelOptions(ai).map((model) => `
+      <option value="${escapeHtml(model)}" ${model === selectedModel ? "selected" : ""}>${escapeHtml(model)}</option>
+    `).join("");
+    const controlsDisabled = ai.queueDepth > 0;
 
     const promptInputWasFocused = refs.aiSidebar.contains(document.activeElement) && document.activeElement?.id === "aiPromptInput";
     const prevScrollTop = refs.aiSidebar.querySelector("#aiSidebarConversation")?.scrollTop ?? 0;
@@ -1365,6 +1389,12 @@
         <div class="ai-sidebar-footer">
           ${ai.permissions.canPrompt ? `
             <form id="aiPromptForm" class="ai-prompt-form">
+              <label class="ai-model-row" for="aiModelSelect">
+                <span>Model</span>
+                <select id="aiModelSelect" class="ai-model-select" ${controlsDisabled ? "disabled" : ""}>
+                  ${modelOptions}
+                </select>
+              </label>
               <textarea id="aiPromptInput" class="ai-prompt-input" placeholder="Ask Jot AI to draft, revise, summarize, or propose changes — proposals appear inline in the preview…">${escapeHtml(state.aiDraft)}</textarea>
               <div class="ai-prompt-actions">
                 <span class="ai-sidebar-subtitle">${ai.queueDepth > 0 ? "Wait for the current turn to finish." : "Shared for this note."}</span>
@@ -1393,6 +1423,13 @@
         promptInput.focus();
         promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
       }
+    }
+    const modelSelect = refs.aiSidebar.querySelector("#aiModelSelect");
+    if (modelSelect) {
+      modelSelect.addEventListener("change", () => {
+        state.aiSelectedModel = modelSelect.value;
+        window.localStorage.setItem(aiModelStorageKey, state.aiSelectedModel);
+      });
     }
 
     refs.aiSidebar.querySelector("#aiSidebarClose")?.addEventListener("click", () => toggleAiSidebar(refs, publicMode));
@@ -1425,7 +1462,7 @@
       try {
         const payload = await api(`${aiBasePath(publicMode)}/prompt`, {
           method: "POST",
-          body: { prompt },
+          body: { prompt, model: getSelectedAiModel(ai) },
         });
         state.aiDraft = "";
         state.ai = payload.ai;

@@ -759,7 +759,7 @@ app.post("/api/notes/:id/ai/prompt", requireOwnerApi, async (req, res) => {
   }
 
   try {
-    const result = await aiRuntime.enqueuePrompt(noteToAiContext(note), actor, String(req.body.prompt || ""), permissions);
+    const result = await aiRuntime.enqueuePrompt(noteToAiContext(note), actor, String(req.body.prompt || ""), permissions, String(req.body.model || ""));
     res.json({ ok: true, runId: result.runId, ai: result.state });
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "Failed to queue AI prompt." });
@@ -778,7 +778,7 @@ app.post("/api/share/:shareId/ai/prompt", async (req, res) => {
   }
 
   try {
-    const result = await aiRuntime.enqueuePrompt(noteToAiContext(note), actor, String(req.body.prompt || ""), permissions);
+    const result = await aiRuntime.enqueuePrompt(noteToAiContext(note), actor, String(req.body.prompt || ""), permissions, String(req.body.model || ""));
     res.json({ ok: true, runId: result.runId, ai: result.state });
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "Failed to queue AI prompt." });

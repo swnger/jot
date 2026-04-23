@@ -37,6 +37,13 @@ jot serve --port=8080        # custom port
 jot serve --data=/var/jot    # custom data dir
 ```
 
+AI chat model options can be configured with environment variables:
+
+```bash
+JOT_AI_MODEL=gpt-5-mini jot serve
+JOT_AI_MODELS=gpt-5,gpt-5-mini,gpt-4.1-mini jot serve
+```
+
 ## Docker
 
 ```bash

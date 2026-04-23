@@ -13,6 +13,8 @@ export const AI_PARTICIPANT = {
 const AI_STATE_VERSION = 1;
 const PROPOSAL_TOOL_NAME = "submit_note_proposal";
 const DEFAULT_MODEL = process.env.JOT_AI_MODEL || "gpt-5";
+const FALLBACK_MODEL_OPTIONS = ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4.1-mini"];
+export const AI_MODEL_OPTIONS = buildModelOptions(DEFAULT_MODEL, process.env.JOT_AI_MODELS);
 
 export type ProposalAnchor = {
   quote: string;
@@ -87,6 +89,7 @@ export type AiActiveRun = {
   id: string;
   promptTurnId: string;
   assistantTurnId: string;
+  model: string;
   status: "running" | "cancelling";
   createdAt: string;
   startedAt: string;
@@ -115,6 +118,8 @@ export type AiPermissions = {
 
 export type SerializedAiState = {
   identity: typeof AI_PARTICIPANT;
+  defaultModel: string;
+  availableModels: string[];
   turns: AiTurn[];
   proposals: AiProposal[];
   activeRun: AiActiveRun | null;
@@ -205,6 +210,24 @@ function clampText(input: string, limit: number) {
 
 function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function buildModelOptions(defaultModel: string, configuredModels: string | undefined) {
+  const configured = (configuredModels || "")
+    .split(",")
+    .map((model) => model.trim())
+    .filter(Boolean);
+  const candidates = configured.length > 0 ? configured : FALLBACK_MODEL_OPTIONS;
+  return [...new Set([defaultModel, ...candidates])];
+}
+
+function resolveModel(model: string | undefined) {
+  const trimmed = String(model || "").trim();
+  const selected = trimmed || DEFAULT_MODEL;
+  if (!AI_MODEL_OPTIONS.includes(selected)) {
+    throw new Error("Selected AI model is not available.");
+  }
+  return selected;
 }
 
 function stringifyToolResult(result: unknown) {
@@ -495,6 +518,8 @@ export class AiRuntimeManager {
 
     return deepClone({
       identity: AI_PARTICIPANT,
+      defaultModel: DEFAULT_MODEL,
+      availableModels: AI_MODEL_OPTIONS,
       turns,
       proposals: state.proposals,
       activeRun: permissions.canViewLive ? state.activeRun : null,
@@ -503,12 +528,13 @@ export class AiRuntimeManager {
     });
   }
 
-  async enqueuePrompt(note: AiNoteContext, actor: AiActor, prompt: string, permissions: AiPermissions): Promise<EnqueuePromptResult> {
+  async enqueuePrompt(note: AiNoteContext, actor: AiActor, prompt: string, permissions: AiPermissions, model?: string): Promise<EnqueuePromptResult> {
     const normalizedActor = normalizeActor(actor);
     const trimmedPrompt = String(prompt || "").trim().slice(0, 6000);
     if (!trimmedPrompt) {
       throw new Error("Prompt is required.");
     }
+    const selectedModel = resolveModel(model);
 
     const state = this.loadState(note.id);
     const timestamp = nowIso();
@@ -533,7 +559,7 @@ export class AiRuntimeManager {
       .catch(() => {})
       .then(async () => {
         try {
-          await this.processPrompt(note, normalizedActor, trimmedPrompt, promptTurnId, runId);
+          await this.processPrompt(note, normalizedActor, trimmedPrompt, promptTurnId, runId, selectedModel);
         } finally {
           const nextCount = Math.max(0, (this.pendingCounts.get(note.id) || 1) - 1);
           if (nextCount === 0) {
@@ -785,7 +811,7 @@ export class AiRuntimeManager {
     return this.clientPromise;
   }
 
-  private async processPrompt(note: AiNoteContext, actor: AiActor, prompt: string, promptTurnId: string, runId: string) {
+  private async processPrompt(note: AiNoteContext, actor: AiActor, prompt: string, promptTurnId: string, runId: string, model: string) {
     const state = this.loadState(note.id);
     const startedAt = nowIso();
     const assistantTurnId = createId(12);
@@ -806,6 +832,7 @@ export class AiRuntimeManager {
       id: runId,
       promptTurnId,
       assistantTurnId,
+      model,
       status: "running",
       createdAt: startedAt,
       startedAt,
@@ -826,7 +853,7 @@ export class AiRuntimeManager {
       const proposalIds = new Set<string>();
       session = await client.createSession({
         clientName: "jot",
-        model: DEFAULT_MODEL,
+        model,
         streaming: true,
         workingDirectory: process.cwd(),
         availableTools: [PROPOSAL_TOOL_NAME],

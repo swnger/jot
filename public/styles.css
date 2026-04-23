@@ -391,6 +391,23 @@ input:focus, textarea:focus { border-color: var(--muted); }
   flex-direction: column;
   gap: 0.75rem;
 }
+.ai-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--muted);
+  font-size: 0.79rem;
+}
+.ai-model-select {
+  min-width: 160px;
+  max-width: 220px;
+  padding: 0.42rem 0.6rem;
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 0.82rem;
+}
 .ai-prompt-input {
   min-height: 90px;
   resize: vertical;
