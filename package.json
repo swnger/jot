@@ -2,6 +2,10 @@
   "name": "@mariozechner/jot",
   "version": "0.1.2",
   "type": "module",
+  "packageManager": "bun@1.3.10",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "bin": {
     "jot": "cli/jot.mjs"
   },
@@ -13,7 +17,7 @@
   ],
   "description": "Minimal self-hosted markdown editor with inline comment threads",
   "scripts": {
-    "dev": "npm run build && node dist/server.js",
+    "dev": "bun run build && node dist/server.js",
     "dev:kit": "vite dev",
     "build": "svelte-kit sync && vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server.js"
@@ -36,7 +40,6 @@
     "@types/sanitize-html": "^2.16.0",
     "@types/ws": "^8.18.1",
     "svelte": "^5.55.4",
-    "tsx": "^4.20.5",
     "typescript": "^5.9.3",
     "vite": "^8.0.10"
   }

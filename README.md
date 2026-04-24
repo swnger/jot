@@ -4,10 +4,17 @@ https://github.com/user-attachments/assets/542c333c-c26e-4f04-a5bb-2cf4131e60f3
 
 Minimal self-hosted collaborative markdown editor with inline comment threads. Built for humans and agents on SvelteKit with a small custom Node server for the real-time collaboration socket.
 
+## Tech Stack
+
+- SvelteKit
+- Vite
+- Bun package manager
+- Node.js 24 LTS runtime
+
 ## Quick Start
 
 ```bash
-npm install -g @mariozechner/jot
+bun add -g @mariozechner/jot
 jot serve
 ```
 
@@ -31,7 +38,7 @@ Open `http://localhost:3210`. Set the owner password on first visit.
 ## Server
 
 ```bash
-npm install -g @mariozechner/jot
+bun add -g @mariozechner/jot
 jot serve                    # port 3210, data in ./data
 jot serve --port=8080        # custom port
 jot serve --data=/var/jot    # custom data dir
@@ -47,11 +54,11 @@ JOT_AI_MODELS=gpt-5,gpt-5-mini,gpt-4.1-mini jot serve
 ## Development
 
 ```bash
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
-`npm run dev` builds the SvelteKit app and starts the custom server so the HTTP API and WebSocket collaboration path are available together.
+`bun run dev` builds the SvelteKit app and starts the custom Node 24 server so the HTTP API and WebSocket collaboration path are available together.
 
 ## Docker
 

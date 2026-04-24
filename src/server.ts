@@ -1319,7 +1319,7 @@ async function loadSvelteKitHandler() {
     if (process.env.NODE_ENV === "production") {
       throw error;
     }
-    console.warn("SvelteKit build not found. Run `npm run build` before starting the server.");
+    console.warn("SvelteKit build not found. Run `bun run build` before starting the server.");
     return null;
   }
 }
