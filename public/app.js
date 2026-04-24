@@ -1,9 +1,10 @@
 (() => {
   const ownerTokenKey = window.__OWNER_TOKEN_KEY__ || "md_owner_token";
   const app = document.getElementById("app");
-  const page = document.body.dataset.page;
-  const noteId = document.body.dataset.noteId || "";
-  const shareId = document.body.dataset.shareId || "";
+  const appDataset = app?.dataset || document.body.dataset;
+  const page = appDataset.page;
+  const noteId = appDataset.noteId || "";
+  const shareId = appDataset.shareId || "";
   const aiModelStorageKey = "jot_ai_model";
 
   if (!app || !page) {
@@ -89,7 +90,7 @@
     renderMermaid(refs.previewContent);
   }
 
-  const shareAccess = document.body.dataset.shareAccess || "";
+  const shareAccess = appDataset.shareAccess || "";
   const ACTION_ICON_MAP = { reply: "reply", "edit-message": "edit", "delete-message": "trash", "delete-thread": "trash" };
 
   const state = {
@@ -711,7 +712,7 @@
     function connectWebSocket(refsArg, publicMode) {
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       const param = publicMode ? `shareId=${encodeURIComponent(shareId)}` : `noteId=${encodeURIComponent(noteId)}`;
-      const wsUrl = `${protocol}//${location.host}/?${param}`;
+      const wsUrl = `${protocol}//${location.host}/ws?${param}`;
       let reconnectDelay = 1000;
       let ws;
 

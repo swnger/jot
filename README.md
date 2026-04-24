@@ -2,7 +2,7 @@
 
 https://github.com/user-attachments/assets/542c333c-c26e-4f04-a5bb-2cf4131e60f3
 
-Minimal self-hosted collaborative markdown editor with inline comment threads. Built for humans and agents.
+Minimal self-hosted collaborative markdown editor with inline comment threads. Built for humans and agents on SvelteKit with a small custom Node server for the real-time collaboration socket.
 
 ## Quick Start
 
@@ -43,6 +43,15 @@ AI chat model options can be configured with environment variables:
 JOT_AI_MODEL=gpt-5-mini jot serve
 JOT_AI_MODELS=gpt-5,gpt-5-mini,gpt-4.1-mini jot serve
 ```
+
+## Development
+
+```bash
+npm install
+npm run dev
+```
+
+`npm run dev` builds the SvelteKit app and starts the custom server so the HTTP API and WebSocket collaboration path are available together.
 
 ## Docker
 

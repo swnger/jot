@@ -1,18 +1,21 @@
 {
   "name": "@mariozechner/jot",
   "version": "0.1.2",
+  "type": "module",
   "bin": {
     "jot": "cli/jot.mjs"
   },
   "files": [
+    "build",
     "dist",
     "public",
     "cli"
   ],
   "description": "Minimal self-hosted markdown editor with inline comment threads",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "dev": "npm run build && node dist/server.js",
+    "dev:kit": "vite dev",
+    "build": "svelte-kit sync && vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server.js"
   },
   "dependencies": {
@@ -26,11 +29,15 @@
     "ws": "^8.20.0"
   },
   "devDependencies": {
+    "@sveltejs/adapter-node": "^5.5.4",
+    "@sveltejs/kit": "^2.57.1",
     "@types/express": "^5.0.3",
     "@types/node": "^24.6.1",
     "@types/sanitize-html": "^2.16.0",
     "@types/ws": "^8.18.1",
+    "svelte": "^5.55.4",
     "tsx": "^4.20.5",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vite": "^8.0.10"
   }
 }

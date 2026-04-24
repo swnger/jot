@@ -421,7 +421,7 @@ export function createCollabEditor(textarea, opts) {
   function connect() {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const param = noteId ? `noteId=${encodeURIComponent(noteId)}` : `shareId=${encodeURIComponent(shareId)}`;
-    ws = new WebSocket(`${protocol}//${location.host}/?${param}`);
+    ws = new WebSocket(`${protocol}//${location.host}/ws?${param}`);
 
     ws.addEventListener("open", () => {});
     ws.addEventListener("message", (event) => {

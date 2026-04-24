@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "noEmit": false,
+    "types": ["node"],
+    "verbatimModuleSyntax": false
+  },
+  "include": ["src/server.ts", "src/ai.ts", "src/collab.ts", "src/lib/server/**/*.ts", "src/types/**/*.d.ts"]
+}
